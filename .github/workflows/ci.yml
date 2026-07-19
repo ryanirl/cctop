@@ -22,17 +22,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install project (with dev extras)
-        run: uv pip install --system -e ".[dev]"
+      - name: Install project (with dev extras) into a venv
+        run: |
+          uv venv
+          uv pip install -e ".[dev]"
 
       - name: Ruff lint
-        run: ruff check src tests
+        run: uv run ruff check src tests
 
       - name: Ruff format
-        run: ruff format --check src tests
+        run: uv run ruff format --check src tests
 
       - name: Mypy
-        run: mypy
+        run: uv run mypy
 
       - name: Tests
-        run: pytest -q
+        run: uv run pytest -q
