@@ -79,3 +79,15 @@ def test_longest_streak_counts_consecutive() -> None:
 def test_top_models_ranked_and_limited() -> None:
     stats = _stats({}, {"opus": 300, "haiku": 100, "sonnet": 200})
     assert top_models(stats, limit=2) == [("opus", 300), ("sonnet", 200)]
+
+
+def test_next_refresh_countdown() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from cctop.app import _format_next_refresh
+
+    now = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+    assert _format_next_refresh(now - timedelta(seconds=12), 180, now) == "next in 2m48s"
+    assert _format_next_refresh(now - timedelta(seconds=45), 60, now) == "next in 15s"
+    assert _format_next_refresh(now - timedelta(seconds=200), 180, now) == "refreshing"
+    assert _format_next_refresh(None, 180, now) == "refreshing"

@@ -157,6 +157,19 @@ def _render_usage(
     return grid
 
 
+def _format_next_refresh(fetched: datetime | None, interval: float, now: datetime) -> str:
+    """Countdown to the next usage refresh, e.g. "next in 2m14s" or "refreshing"."""
+    if fetched is None:
+        return "refreshing"
+    remaining = interval - (now - fetched).total_seconds()
+    if remaining <= 1:
+        return "refreshing"
+    if remaining < 60:
+        return f"next in {int(remaining)}s"
+    minutes, seconds = divmod(int(remaining), 60)
+    return f"next in {minutes}m{seconds:02d}s"
+
+
 class CctopApp(App):
     """nvtop-style live view of Claude Code sessions and usage limits."""
 
@@ -369,14 +382,15 @@ class CctopApp(App):
         total_tokens = sum(s.totals.total_tokens for s in states)
         total_cost = sum(s.totals.cost_usd or 0.0 for s in states)
         fetched = self.monitor.limits_fetched_at
-        age = f"limits {_format_age(fetched, now)} ago" if fetched else "limits ..."
+        age = f"updated {_format_age(fetched, now)} ago" if fetched else "no data yet"
+        nxt = _format_next_refresh(fetched, self._limits_interval, now)
         footer = Text.assemble(
             (
                 f"{len(states)} sessions · {_format_tokens(total_tokens)} tokens · "
                 f"${total_cost:,.0f}",
                 "default",
             ),
-            (f"      {age}", MUTED),
+            (f"      usage {age} · {nxt}", MUTED),
             ("      s stats · r limits · R token · a add · q quit", MUTED),
         )
         self.query_one("#footer", Static).update(footer)

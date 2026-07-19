@@ -7,6 +7,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- The footer shows a live countdown to the next usage refresh (e.g. "next in
+  2m14s"), ticking every second alongside how long ago it last updated.
 - Optional `~/.config/cctop/config.toml` (created by `cctop config init`, never
   written silently) to rename, hide, reorder, or add accounts and tune settings;
   it layers over auto-detection, which now also picks up non-numeric
