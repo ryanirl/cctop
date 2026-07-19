@@ -589,49 +589,88 @@ def _codex_available() -> bool:
     )
 
 
-def _setup_provider(provider: str, console: Console) -> None:
-    """Confirm, then set cctop up for one provider: write the config, and for
-    Claude verify each account's token via the owner binary.
+def _confirm(console: Console, prompt: str) -> bool:
+    """A yes/no prompt that defaults to no on anything but y/yes."""
+    return console.input(f"{prompt} (y/n): ").strip().lower() in ("y", "yes")
 
-    The confirmation is the gate before anything launches `claude`/`codex`.
-    """
-    from . import config as config_module
-    from .collect import discover_accounts
 
-    accounts = [a for a in discover_accounts() if a.provider == provider]
-    label = "Claude Code" if provider == "claude" else "OpenAI Codex"
-    console.print(f"\n[bold]Set up {label}[/bold]")
-    found = ", ".join(a.name for a in accounts) or "(none signed in yet)"
-    console.print(f"  detected accounts: {found}")
-    if provider == "claude" and accounts:
-        console.print(
-            "  cctop will run [bold]claude mcp list[/bold] on each account to verify "
-            "and refresh its token (quota-free)."
-        )
+_SETUP_PROMPT = """Help me set up cctop, a terminal monitor for my Claude Code and OpenAI Codex
+accounts. It is already installed (the `cctop` command).
 
-    reply = console.input("\nProceed? [y/N]: ").strip().lower()
-    if reply not in ("y", "yes"):
-        console.print("[grey50]Cancelled. Nothing changed.[/grey50]")
-        return
+Goal: make sure cctop shows all my accounts, correctly labeled.
 
-    path = config_module.config_path()
-    if path.exists():
-        console.print(f"  config already exists at {path}, left as-is")
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_config_template())
-        console.print(f"  [green]+[/green] wrote {path}")
+1. Run `cctop accounts` and `cctop doctor` to see what it already auto-detects
+   (it finds ~/.claude, any ~/.claude-* config dir, and ~/.codex automatically).
+2. Ask me how I organize my accounts if anything looks missing (config dirs in
+   non-standard locations, or an account-switcher tool).
+3. cctop reads an OPTIONAL config at ~/.config/cctop/config.toml. Run
+   `cctop config init` to generate a starter pre-filled with detected accounts,
+   then edit it. Each account block is:
+     [[account]]
+     name = "work"            # label shown in cctop
+     dir  = "~/.claude-work"  # the account's CLAUDE_CONFIG_DIR (or ~/.codex)
+     provider = "claude"      # or "codex"
+     hidden = false           # true to hide it
+   and [settings] supports limits_refresh_seconds and heatmap_weeks.
+4. Only edit that config file, and be strictly additive: never delete or
+   overwrite my credentials, sessions, or other config. Confirm before writing.
+5. When done, tell me to run `cctop`.
 
-    if provider == "claude" and accounts:
+Keep it short and interactive."""
+
+
+def _launch_agent(provider: str, console: Console) -> None:
+    """Launch the provider's agent, seeded with the setup prompt, to configure
+    cctop interactively. cctop writes nothing itself; the agent (with the user)
+    does, additively."""
+    import shutil
+    import subprocess
+
+    if provider == "claude":
         from . import authctl
 
-        now = datetime.now(timezone.utc)
-        for account in accounts:
-            result = authctl.refresh(account.name, account.config_dir, now)
-            mark = "[green]+[/green]" if result.ok else "[grey50]-[/grey50]"
-            console.print(f"  {mark} {account.name}: {result.message}")
+        binary = authctl.find_claude_binary()
+    else:
+        binary = shutil.which("codex")
+    if binary is None:
+        console.print(f"[red]{provider} binary not found on PATH.[/red]")
+        return
 
-    console.print("\n[green]Done.[/green] Run [bold]cctop[/bold] to see it.")
+    console.print(f"[grey50]Launching {provider} to help configure cctop...[/grey50]\n")
+    try:
+        subprocess.run([binary, _SETUP_PROMPT])
+    except (OSError, KeyboardInterrupt):
+        console.print("\n[grey50]Setup session ended.[/grey50]")
+
+
+def _setup_provider(provider: str, console: Console) -> None:
+    """Hand off to the provider's agent to configure cctop, behind a confirm gate.
+
+    For the common auto-detected case the user is told they are already set; the
+    hand-off is for custom layouts or signing in. cctop writes nothing itself:
+    the launched claude/codex does the configuring, additively.
+    """
+    from .collect import discover_accounts
+
+    label = "Claude Code" if provider == "claude" else "OpenAI Codex"
+    accounts = [a for a in discover_accounts() if a.provider == provider]
+    console.print(f"\n[bold]Set up {label}[/bold]\n")
+
+    if accounts:
+        console.print(f"cctop already sees your accounts: {', '.join(a.name for a in accounts)}.")
+        console.print("For the common case that's all you need: just run [bold]cctop[/bold].")
+        question = f"Launch {label} to help customize (rename/hide/organize, add accounts)?"
+    else:
+        console.print(f"No {label} account is signed in yet.")
+        question = f"Launch {label} to help sign in and configure cctop?"
+
+    if not _confirm(console, f"\n{question}"):
+        console.print(
+            "[grey50]Skipped. Run [/grey50]cctop[grey50], "
+            "[/grey50]cctop config init[grey50], or the settings screen (,) anytime.[/grey50]"
+        )
+        return
+    _launch_agent(provider, console)
 
 
 def _cmd_setup() -> None:

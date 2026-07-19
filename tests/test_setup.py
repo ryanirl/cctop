@@ -40,3 +40,13 @@ def test_none_available_selects_nothing() -> None:
         return app.selected
 
     assert _run(inner()) is None
+
+
+def test_launch_agent_missing_binary(monkeypatch, capsys) -> None:
+    from rich.console import Console
+
+    from cctop import authctl, cli
+
+    monkeypatch.setattr(authctl, "find_claude_binary", lambda: None)
+    cli._launch_agent("claude", Console())  # must not raise
+    assert "not found" in capsys.readouterr().out
