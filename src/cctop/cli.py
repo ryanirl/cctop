@@ -567,6 +567,91 @@ def _cmd_config(argv: list[str]) -> None:
     console.print("usage: [bold]cctop config[/bold] [init [--force] | path]")
 
 
+def _claude_available() -> bool:
+    """Whether cctop can detect Claude Code: its binary or a config dir."""
+    from . import authctl
+    from .collect import _looks_like_config_dir
+
+    return authctl.find_claude_binary() is not None or _looks_like_config_dir(
+        Path.home() / ".claude"
+    )
+
+
+def _codex_available() -> bool:
+    """Whether cctop can detect Codex: its binary or the ~/.codex data dir."""
+    import shutil
+
+    codex = Path.home() / ".codex"
+    return (
+        shutil.which("codex") is not None
+        or (codex / "auth.json").exists()
+        or (codex / "sessions").is_dir()
+    )
+
+
+def _setup_provider(provider: str, console: Console) -> None:
+    """Confirm, then set cctop up for one provider: write the config, and for
+    Claude verify each account's token via the owner binary.
+
+    The confirmation is the gate before anything launches `claude`/`codex`.
+    """
+    from . import config as config_module
+    from .collect import discover_accounts
+
+    accounts = [a for a in discover_accounts() if a.provider == provider]
+    label = "Claude Code" if provider == "claude" else "OpenAI Codex"
+    console.print(f"\n[bold]Set up {label}[/bold]")
+    found = ", ".join(a.name for a in accounts) or "(none signed in yet)"
+    console.print(f"  detected accounts: {found}")
+    if provider == "claude" and accounts:
+        console.print(
+            "  cctop will run [bold]claude mcp list[/bold] on each account to verify "
+            "and refresh its token (quota-free)."
+        )
+
+    reply = console.input("\nProceed? [y/N]: ").strip().lower()
+    if reply not in ("y", "yes"):
+        console.print("[grey50]Cancelled. Nothing changed.[/grey50]")
+        return
+
+    path = config_module.config_path()
+    if path.exists():
+        console.print(f"  config already exists at {path}, left as-is")
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_config_template())
+        console.print(f"  [green]+[/green] wrote {path}")
+
+    if provider == "claude" and accounts:
+        from . import authctl
+
+        now = datetime.now(timezone.utc)
+        for account in accounts:
+            result = authctl.refresh(account.name, account.config_dir, now)
+            mark = "[green]+[/green]" if result.ok else "[grey50]-[/grey50]"
+            console.print(f"  {mark} {account.name}: {result.message}")
+
+    console.print("\n[green]Done.[/green] Run [bold]cctop[/bold] to see it.")
+
+
+def _cmd_setup() -> None:
+    """`cctop setup`: pick a detected provider (Claude/Codex) and configure it."""
+    from .setup_screen import Provider, SetupApp
+
+    providers = [
+        Provider("claude", "Claude Code", _claude_available()),
+        Provider("codex", "OpenAI Codex", _codex_available()),
+    ]
+    app = SetupApp(providers)
+    app.run()
+
+    console = Console()
+    if app.selected is None:
+        console.print("[grey50]No provider set up.[/grey50]")
+        return
+    _setup_provider(app.selected, console)
+
+
 def _resolve_accounts(args: argparse.Namespace) -> list[Account]:
     if args.account:
         accounts = []
@@ -594,6 +679,9 @@ def main() -> None:
         return
     if argv[:1] == ["config"]:
         _cmd_config(argv[1:])
+        return
+    if argv[:1] == ["setup"]:
+        _cmd_setup()
         return
 
     parser = argparse.ArgumentParser(

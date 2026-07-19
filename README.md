@@ -64,6 +64,7 @@ cctop --once          # print a one-shot snapshot and exit
 cctop --json          # emit the snapshot as JSON (for scripting)
 cctop --no-limits     # skip the usage fetch (no network, session table only)
 
+cctop setup           # pick a detected provider (Claude/Codex) and configure it
 cctop accounts        # list discovered accounts (read-only)
 cctop doctor          # read-only self-check (platform, binaries, token/expiry)
 cctop config init     # write a starter ~/.config/cctop/config.toml (optional)

@@ -7,6 +7,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `cctop setup`: a small provider chooser (Claude Code / OpenAI Codex) that only
+  lets you pick a provider cctop can actually detect; an undetected one is shown
+  dimmed and unselectable, and a note appears if neither is found. After you
+  confirm (the gate before anything launches `claude`/`codex`), it writes the
+  config and, for Claude, verifies each account's token.
 - A settings screen (`,`) that live-edits the config with no restart: usage
   refresh interval, heatmap range, and per-account show/hide + rename, written
   to `config.toml` and applied immediately.
