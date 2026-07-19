@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-07-19
 
 ### Added
 - `cctop setup`: a small provider chooser (Claude Code / OpenAI Codex) that only
@@ -24,7 +24,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   written silently) to rename, hide, reorder, or add accounts and tune settings;
   it layers over auto-detection, which now also picks up non-numeric
   `~/.claude-*` config dirs (e.g. `~/.claude-work`), not just numeric ones.
-- The USAGE panel now wraps account blocks onto multiple rows and sizes bars to
+
+## [0.1.0] - 2026-07-19
+
+### Added
+- The USAGE panel wraps account blocks onto multiple rows and sizes bars to
   the terminal width, reflowing live on resize instead of overflowing when many
   accounts or a narrow window are in play.
 - Live TUI monitoring Claude Code and OpenAI Codex sessions side by side, with
@@ -48,4 +52,5 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `LICENSE` (MIT), `SECURITY.md`, and packaging metadata (distribution
   `cctop-tui`; the command stays `cctop`).
 
-[Unreleased]: https://github.com/ryanirl/cctop/commits/main
+[0.2.0]: https://github.com/ryanirl/cctop/releases/tag/v0.2.0
+[0.1.0]: https://github.com/ryanirl/cctop/releases/tag/v0.1.0
