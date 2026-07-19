@@ -70,8 +70,9 @@ cctop config init     # write a starter ~/.config/cctop/config.toml (optional)
 cctop add-account     # provision a new account (dry-run; see Accounts below)
 ```
 
-TUI keys: `s` stats · `r` refresh limits · `R` refresh token · `a` add account ·
-`q` quit.
+TUI keys: `r` refresh now · `R` refresh token · `a` add account · `s` stats ·
+`,` settings · `q` quit. The footer shows a live countdown to the next auto
+refresh; `r` refreshes immediately and resets it.
 
 ### Token refresh (`R`)
 

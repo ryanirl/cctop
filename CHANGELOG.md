@@ -7,6 +7,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- A settings screen (`,`) that live-edits the config with no restart: usage
+  refresh interval, heatmap range, and per-account show/hide + rename, written
+  to `config.toml` and applied immediately.
+- `r` is now a true force-refresh: it clears per-account rate-limit backoff,
+  refetches immediately, and resets the next-refresh timer + countdown.
 - The footer shows a live countdown to the next usage refresh (e.g. "next in
   2m14s"), ticking every second alongside how long ago it last updated.
 - Optional `~/.config/cctop/config.toml` (created by `cctop config init`, never

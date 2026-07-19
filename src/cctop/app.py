@@ -26,6 +26,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Container
+from textual.timer import Timer
 from textual.widgets import DataTable, Rule, Static
 
 from .cli import (
@@ -213,12 +214,20 @@ class CctopApp(App):
         ("R", "refresh_token", "Refresh token"),
         ("a", "add_account", "Add account"),
         ("s", "stats", "Stats"),
+        ("comma", "settings", "Settings"),
     ]
 
-    def __init__(self, accounts: list[Account], limits_interval: float = 180.0) -> None:
+    def __init__(
+        self,
+        accounts: list[Account],
+        limits_interval: float = 180.0,
+        heatmap_weeks: int = 26,
+    ) -> None:
         super().__init__()
         self.monitor = FleetMonitor(accounts)
         self._limits_interval = limits_interval
+        self._heatmap_weeks = heatmap_weeks
+        self._limits_timer: Timer | None = None
         self._states_by_id: dict[str, SessionState] = {}
         self._selected_session_id: str | None = None
 
@@ -246,7 +255,7 @@ class CctopApp(App):
         self.query_one("#usage", Static).update(Text("fetching limits...", style=MUTED))
         self.query_one("#stats", Static).update(Text("loading stats...", style=MUTED))
         self.set_interval(1.0, self._tick_sessions)
-        self.set_interval(self._limits_interval, self._tick_limits)
+        self._limits_timer = self.set_interval(self._limits_interval, self._tick_limits)
         self.set_interval(300.0, self._tick_stats)
         self._tick_sessions()
         self.action_refresh_limits()
@@ -267,7 +276,7 @@ class CctopApp(App):
         if provider_stats:
             parts.append(render_stats_table(provider_stats))
             parts.append(Text())
-            parts.append(render_heatmaps_row(provider_stats, today, weeks=26))
+            parts.append(render_heatmaps_row(provider_stats, today, weeks=self._heatmap_weeks))
         content = Group(*parts) if parts else Text("no stats", style=MUTED)
 
         self.call_from_thread(lambda: self.query_one("#stats", Static).update(content))
@@ -391,7 +400,7 @@ class CctopApp(App):
                 "default",
             ),
             (f"      usage {age} · {nxt}", MUTED),
-            ("      s stats · r limits · R token · a add · q quit", MUTED),
+            ("      r refresh · R token · a add · s stats · , settings · q quit", MUTED),
         )
         self.query_one("#footer", Static).update(footer)
 
@@ -407,6 +416,36 @@ class CctopApp(App):
         from .stats_screen import StatsScreen
 
         self.push_screen(StatsScreen(self.monitor.accounts, date.today()))
+
+    def action_settings(self) -> None:
+        from . import config as config_module
+        from .collect import discover_accounts
+        from .settings_screen import SettingsScreen, build_rows
+
+        rows = build_rows(discover_accounts(), config_module.load_config())
+        self.push_screen(SettingsScreen(self._limits_interval, self._heatmap_weeks, rows))
+
+    def apply_settings(self) -> None:
+        """Reload the config file and apply it live (called by the settings screen).
+
+        Updates the refresh interval (rescheduling the timer + countdown), the
+        heatmap range, and the visible account set, with no restart.
+        """
+        from datetime import timedelta
+
+        from . import config as config_module
+        from .collect import resolve_accounts
+
+        config = config_module.load_config()
+        self._limits_interval = config.limits_refresh_seconds(180.0)
+        self._heatmap_weeks = config.heatmap_weeks(26)
+        self.monitor.limits_interval = timedelta(seconds=self._limits_interval)
+        self.monitor.accounts = resolve_accounts(config)
+
+        self._reschedule_limits_timer()
+        self.action_refresh_limits()
+        self._tick_sessions()
+        self._tick_stats()
 
     def action_add_account(self) -> None:
         """Provision an account and sign in, without leaving cctop.
@@ -499,8 +538,16 @@ class CctopApp(App):
     @work(thread=True, exclusive=True, group="limits")
     def _force_limits(self) -> None:
         now = datetime.now(timezone.utc)
-        limits = self.monitor.poll_limits(now, force=True)
+        limits = self.monitor.force_refresh_limits(now)
         self.call_from_thread(self._render_limits, limits, now)
+        # Reset the periodic timer so the next auto-refresh is a full interval
+        # away, keeping the footer countdown honest after a manual refresh.
+        self.call_from_thread(self._reschedule_limits_timer)
+
+    def _reschedule_limits_timer(self) -> None:
+        if self._limits_timer is not None:
+            self._limits_timer.stop()
+        self._limits_timer = self.set_interval(self._limits_interval, self._tick_limits)
 
     def _render_limits(self, limits: list[AccountLimits], now: datetime) -> None:
         usage = self.query_one("#usage", Static)

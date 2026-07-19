@@ -104,3 +104,32 @@ def test_config_init_writes_and_refuses_overwrite(tmp_path: Path, monkeypatch, c
 
     cli._cmd_config(["init"])  # second time: refuse without --force
     assert "overwriting" in capsys.readouterr().out.replace("\n", " ")
+
+
+def test_save_config_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    accounts = [
+        cfg.AccountOverride(dir=Path("/x/.claude"), name="work", provider="claude"),
+        cfg.AccountOverride(dir=Path("/x/.claude-1"), name="alt", provider="claude", hidden=True),
+    ]
+    cfg.save_config({"limits_refresh_seconds": 90, "heatmap_weeks": 10}, accounts, path)
+
+    loaded = cfg.load_config(path)
+    assert loaded.limits_refresh_seconds(180.0) == 90.0
+    assert loaded.heatmap_weeks(26) == 10
+    assert {o.name: o.hidden for o in loaded.accounts} == {"work": False, "alt": True}
+
+
+def test_build_rows_reflects_config() -> None:
+    from cctop.settings_screen import build_rows
+
+    detected = [
+        Account("cc-0", Path("/x/.claude"), "claude"),
+        Account("cc-1", Path("/x/.claude-1"), "claude"),
+    ]
+    config = cfg.Config(
+        accounts=[cfg.AccountOverride(dir=Path("/x/.claude"), name="renamed", hidden=True)]
+    )
+    rows = build_rows(detected, config)
+    assert rows[0].name == "renamed" and rows[0].hidden is True
+    assert rows[1].name == "cc-1" and rows[1].hidden is False

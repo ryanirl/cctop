@@ -196,6 +196,18 @@ class FleetMonitor:
         self.limits_fetched_at = now
         return self.limits
 
+    def force_refresh_limits(self, now: datetime | None = None) -> list[AccountLimits]:
+        """User-initiated hard refresh: clear per-account backoff and refetch now.
+
+        Unlike the periodic poll (which honors cooldowns), an explicit refresh
+        clears them so a rate-limited account is retried immediately; if it 429s
+        again, backoff simply re-engages and the last-good numbers stay shown.
+        """
+        now = now or datetime.now(timezone.utc)
+        self._cooldown_until.clear()
+        self._backoff.clear()
+        return self.poll_limits(now, force=True)
+
     def refresh_credentials(
         self, now: datetime | None = None
     ) -> tuple[list[RefreshResult], list[AccountLimits]]:

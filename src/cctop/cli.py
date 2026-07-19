@@ -642,8 +642,12 @@ def main() -> None:
         from . import config as config_module
         from .app import CctopApp
 
-        interval = config_module.load_config().limits_refresh_seconds(180.0)
-        CctopApp(accounts, limits_interval=interval).run()
+        cfg = config_module.load_config()
+        CctopApp(
+            accounts,
+            limits_interval=cfg.limits_refresh_seconds(180.0),
+            heatmap_weeks=cfg.heatmap_weeks(26),
+        ).run()
         return
 
     now = datetime.now(timezone.utc)
