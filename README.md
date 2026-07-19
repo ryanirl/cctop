@@ -18,7 +18,7 @@ your credentials only to make those reads, never logs or transmits a token, and
 is read-only except for two explicit, additive account actions. See
 [SECURITY.md](SECURITY.md) for the full trust statement.
 
-![cctop](docs/hero.png)
+![cctop](https://raw.githubusercontent.com/ryanirl/cctop/main/docs/hero.png)
 
 ## What it shows
 
