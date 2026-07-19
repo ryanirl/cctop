@@ -7,6 +7,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Optional `~/.config/cctop/config.toml` (created by `cctop config init`, never
+  written silently) to rename, hide, reorder, or add accounts and tune settings;
+  it layers over auto-detection, which now also picks up non-numeric
+  `~/.claude-*` config dirs (e.g. `~/.claude-work`), not just numeric ones.
 - The USAGE panel now wraps account blocks onto multiple rows and sizes bars to
   the terminal width, reflowing live on resize instead of overflowing when many
   accounts or a narrow window are in play.

@@ -66,6 +66,7 @@ cctop --no-limits     # skip the usage fetch (no network, session table only)
 
 cctop accounts        # list discovered accounts (read-only)
 cctop doctor          # read-only self-check (platform, binaries, token/expiry)
+cctop config init     # write a starter ~/.config/cctop/config.toml (optional)
 cctop add-account     # provision a new account (dry-run; see Accounts below)
 ```
 
@@ -98,6 +99,23 @@ all side by side. To add one without leaving cctop, press `a` (or run
 existing config, and signs you in. It is **strictly additive** — it never
 deletes, overwrites, or modifies existing config, credentials, or sessions, and
 only writes a shell alias if you explicitly ask for one.
+
+### Configuration (optional)
+
+cctop needs no configuration. If you want to rename, hide, reorder, or add
+accounts (for a layout auto-detection can't guess, like a config dir in a custom
+location or one managed by an account switcher), generate a starter file and
+edit it:
+
+```bash
+cctop config init     # writes ~/.config/cctop/config.toml, pre-filled with what it detected
+```
+
+It is layered over auto-detection, so anything you leave out falls back to the
+default. Rename an account with `name`, drop one with `hidden = true`, reorder by
+moving blocks, or add a block pointing `dir` at any Claude/Codex config
+directory. Delete the file to go back to pure auto-detection. Nothing is ever
+written to it unless you run `config init`.
 
 ## How it works
 

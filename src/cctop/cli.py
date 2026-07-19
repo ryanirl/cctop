@@ -506,6 +506,67 @@ def _cmd_add_account(argv: list[str]) -> None:
         )
 
 
+def _config_template() -> str:
+    """A commented starter config pre-populated with the detected accounts."""
+    from .collect import discover_accounts
+
+    home = str(Path.home())
+    lines = [
+        "# cctop config. Everything here is OPTIONAL: cctop works with no config at",
+        "# all (pure auto-detection). Edit only what you want to change; delete a line",
+        "# to fall back to the default.",
+        "",
+        "[settings]",
+        "# limits_refresh_seconds = 180   # how often to refetch usage limits",
+        "",
+        "# Accounts cctop auto-detected. Rename via `name`, hide with `hidden = true`,",
+        "# reorder by moving blocks, or add your own block pointing at any config dir.",
+    ]
+    for account in discover_accounts():
+        directory = str(account.config_dir).replace(home, "~", 1)
+        lines += [
+            "",
+            "[[account]]",
+            f'name = "{account.name}"',
+            f'dir = "{directory}"',
+            f'provider = "{account.provider}"',
+            "# hidden = false",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _cmd_config(argv: list[str]) -> None:
+    """`cctop config init [--force]` writes a starter config; `config path` prints it.
+
+    Never overwrites an existing config without --force, and never creates one
+    implicitly: cctop runs fine with no config file at all.
+    """
+    from . import config as config_module
+
+    console = Console()
+    path = config_module.config_path()
+    sub = argv[0] if argv else ""
+
+    if sub == "path":
+        console.print(str(path))
+        return
+    if sub == "init":
+        if path.exists() and "--force" not in argv:
+            console.print(
+                f"[grey50]{path} already exists; not overwriting (pass --force).[/grey50]"
+            )
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_config_template())
+        console.print(f"[green]+[/green] wrote {path}")
+        console.print(
+            "[grey50]Edit it to rename/hide/reorder/add accounts or tune settings.[/grey50]"
+        )
+        return
+
+    console.print("usage: [bold]cctop config[/bold] [init [--force] | path]")
+
+
 def _resolve_accounts(args: argparse.Namespace) -> list[Account]:
     if args.account:
         accounts = []
@@ -530,6 +591,9 @@ def main() -> None:
         return
     if argv[:1] == ["doctor"]:
         _cmd_doctor()
+        return
+    if argv[:1] == ["config"]:
+        _cmd_config(argv[1:])
         return
 
     parser = argparse.ArgumentParser(
@@ -575,9 +639,11 @@ def main() -> None:
 
     if not args.once and not args.json:
         # Default: launch the live TUI, which polls with its own throttles.
+        from . import config as config_module
         from .app import CctopApp
 
-        CctopApp(accounts).run()
+        interval = config_module.load_config().limits_refresh_seconds(180.0)
+        CctopApp(accounts, limits_interval=interval).run()
         return
 
     now = datetime.now(timezone.utc)

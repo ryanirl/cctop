@@ -69,24 +69,33 @@ def _looks_like_config_dir(path: Path) -> bool:
     )
 
 
-def discover_accounts() -> list[Account]:
-    """Every Claude Code account under the home dir, labeled cc-<N>.
+def _provider_for(config_dir: Path) -> str:
+    """Infer the provider from a config dir path (codex vs claude)."""
+    return "codex" if "codex" in config_dir.name.lower() else "claude"
 
-    ~/.claude is cc-0; ~/.claude-<N> is cc-<N>, matching the `cc-N` shell
-    aliases. Discovering by glob means a newly added account is picked up
-    automatically, with no hardcoded list to maintain.
+
+def discover_accounts() -> list[Account]:
+    """Every account auto-detected under the home dir.
+
+    ~/.claude is cc-0; any ~/.claude-<suffix> that looks like a real config dir
+    is picked up too (numeric suffixes sort first as cc-<N>, named ones like
+    ~/.claude-work become cc-work), so it is not limited to the numeric shell-
+    alias convention. ~/.codex is added as cx-0. Discovering by glob means a new
+    account appears automatically, with no hardcoded list to maintain.
     """
     home = Path.home()
-    found: list[tuple[int, Account]] = []
+    found: list[tuple[tuple[int, str], Account]] = []
 
     base = home / ".claude"
     if _looks_like_config_dir(base):
-        found.append((0, Account("cc-0", base)))
+        found.append(((0, ""), Account("cc-0", base)))
 
     for path in home.glob(".claude-*"):
+        if not path.is_dir() or not _looks_like_config_dir(path):
+            continue
         suffix = path.name[len(".claude-") :]
-        if path.is_dir() and suffix.isdigit() and _looks_like_config_dir(path):
-            found.append((int(suffix), Account(f"cc-{suffix}", path)))
+        order = (int(suffix), "") if suffix.isdigit() else (10_000, suffix)
+        found.append((order, Account(f"cc-{suffix}", path)))
 
     found.sort(key=lambda item: item[0])
     accounts = [account for _, account in found] or [Account("default", default_config_dir())]
@@ -98,8 +107,50 @@ def discover_accounts() -> list[Account]:
     return accounts
 
 
-# Backwards-compatible alias for the discovery entry point.
-default_accounts = discover_accounts
+def resolve_accounts(config=None) -> list[Account]:
+    """Auto-detected accounts with the config file's overrides applied.
+
+    The config can rename, hide, reorder (by listing), or add accounts pointing
+    at any config dir. With no config file this returns exactly
+    discover_accounts(), so cctop always works out of the box.
+    """
+    from . import config as config_module
+
+    if config is None:
+        config = config_module.load_config()
+    overrides = {override.dir: override for override in config.accounts}
+
+    result: list[Account] = []
+    seen: set[Path] = set()
+    for account in discover_accounts():
+        seen.add(account.config_dir)
+        override = overrides.get(account.config_dir)
+        if override is not None and override.hidden:
+            continue
+        if override is not None:
+            account = Account(
+                override.name or account.name,
+                account.config_dir,
+                override.provider or account.provider,
+            )
+        result.append(account)
+
+    for override in config.accounts:
+        if override.dir in seen or override.hidden:
+            continue
+        result.append(
+            Account(
+                override.name or override.dir.name.lstrip("."),
+                override.dir,
+                override.provider or _provider_for(override.dir),
+            )
+        )
+
+    return result
+
+
+# The default account list applies the config file over auto-detection.
+default_accounts = resolve_accounts
 
 
 def _effective_status(
