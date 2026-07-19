@@ -40,14 +40,14 @@ is read-only except for two explicit, additive account actions. See
 
 Requires **macOS** and **Python 3.11+** (Linux support is planned).
 
-Once published to PyPI (distribution name `cctop-tui`), the one-liners are:
+The package is `cctop-tui`; the command it installs is `cctop`.
 
 ```bash
-uv tool install cctop-tui     # or: pipx install cctop-tui
-uvx cctop-tui                 # run without installing (starts the `cctop` TUI)
+uv tool install cctop-tui       # or: pipx install cctop-tui  -> then run: cctop
+uvx --from cctop-tui cctop      # run without installing
 ```
 
-From a clone (current default while pre-release):
+Or from a clone:
 
 ```bash
 cd cctop
