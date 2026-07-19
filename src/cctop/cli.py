@@ -1,0 +1,599 @@
+"""Command-line entry point.
+
+M0 ships the one-shot views: `cctop --once` prints a limits header band plus the
+current fleet table, and `cctop --json` emits the same snapshot for scripting.
+The live Textual TUI is M1.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from rich.console import Console
+from rich.table import Table
+
+from .collect import Account, build_snapshot, default_accounts
+from .models import AccountLimits, FleetSnapshot, LimitWindow, SessionState
+from .status import SessionStatus
+
+# Status to (label, rich style). Colors follow a quiet palette: green idle,
+# yellow working, red blocked or dead, grey stale or unknown.
+_STATUS_DISPLAY: dict[SessionStatus, tuple[str, str]] = {
+    SessionStatus.IDLE: ("idle", "green"),
+    SessionStatus.SHELL: ("shell", "yellow"),
+    SessionStatus.GENERATING: ("generating", "cyan"),
+    SessionStatus.WAITING_PERMISSION: ("waiting", "bold red"),
+    SessionStatus.STALE: ("stale", "grey50"),
+    SessionStatus.DEAD: ("dead", "red"),
+    SessionStatus.UNKNOWN: ("unknown", "grey50"),
+}
+
+
+def _format_age(moment: datetime | None, now: datetime) -> str:
+    """A compact relative age like "12s", "5m", "3h" for a past timestamp."""
+    if moment is None:
+        return "-"
+    seconds = max(0, int((now - moment).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _format_reset(moment: datetime | None, now: datetime) -> str:
+    """A compact countdown to a future reset time like "3h12m", "2d"."""
+    if moment is None:
+        return "?"
+    seconds = int((moment - now).total_seconds())
+    if seconds <= 0:
+        return "now"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60}m"
+    return f"{seconds // 86400}d"
+
+
+def _format_tokens(count: int) -> str:
+    """Human counts: 1234 -> "1.2k", 3400000 -> "3.4M"."""
+    if count < 1000:
+        return str(count)
+    if count < 1_000_000:
+        return f"{count / 1000:.1f}k"
+    return f"{count / 1_000_000:.1f}M"
+
+
+def _format_cost(cost: float | None) -> str:
+    return "-" if cost is None else f"${cost:.2f}"
+
+
+def _format_context(state: SessionState) -> str:
+    if state.context is None:
+        return "-"
+    return f"{state.context.used_fraction * 100:.0f}%"
+
+
+def _format_model(model: str | None) -> str:
+    if not model:
+        return "-"
+    return model.removeprefix("claude-")
+
+
+def _short_cwd(cwd: str) -> str:
+    """Show the cwd relative to home, keeping the last two path segments."""
+    home = str(Path.home())
+    if cwd.startswith(home):
+        cwd = "~" + cwd[len(home) :]
+    parts = cwd.split("/")
+    if len(parts) > 3:
+        return ".../" + "/".join(parts[-2:])
+    return cwd
+
+
+def _bar_color(fraction: float) -> str:
+    """Green below 70%, amber to 90%, red above: a quiet load ramp."""
+    if fraction >= 0.9:
+        return "red"
+    if fraction >= 0.7:
+        return "yellow"
+    return "green"
+
+
+def _severity_color(severity: str, fraction: float) -> str:
+    """Red for any non-normal severity, else a quiet load ramp by fill."""
+    if severity and severity != "normal":
+        return "red"
+    return _bar_color(fraction)
+
+
+def _render_gauge(window: LimitWindow, now: datetime) -> str:
+    """One "week (Fable)* [####    ] 14% resets 1d" gauge as rich markup."""
+    if not window.has_data:
+        return f"{window.label} [{'.' * 10}] [grey50]no usage yet[/grey50]"
+    fraction = window.used_fraction
+    filled = int(round(fraction * 10))
+    color = _severity_color(window.severity, fraction)
+    bar = "[" + color + "]" + "#" * filled + "[/" + color + "]" + "." * (10 - filled)
+    reset = _format_reset(window.resets_at, now)
+    active = "[bold]*[/bold]" if window.is_active else ""
+    return (
+        f"{window.label}{active} [{bar}] "
+        f"[{color}]{window.percent:.0f}%[/{color}] "
+        f"[grey50]resets {reset}[/grey50]"
+    )
+
+
+def _tier_label(tier: str | None) -> str:
+    if not tier:
+        return ""
+    return tier.replace("default_claude_", "").replace("_", " ")
+
+
+def _render_limits(limits: list[AccountLimits], now: datetime, console: Console) -> None:
+    for account in limits:
+        header = f"[bold]{account.account}[/bold]"
+        tier = _tier_label(account.tier)
+        if tier:
+            header += f" [grey50]({tier})[/grey50]"
+
+        if account.source != "api":
+            console.print(f"{header}   [grey50]{account.error or 'no limit data'}[/grey50]")
+            continue
+
+        gauges = "   ".join(_render_gauge(w, now) for w in account.windows)
+        age = _format_age(account.fetched_at, now)
+        console.print(f"{header}   {gauges}   [grey50]{age} ago[/grey50]")
+
+
+def _render_table(snapshot: FleetSnapshot, multi_account: bool) -> Table:
+    table = Table(title="cctop", title_style="bold", expand=False)
+    if multi_account:
+        table.add_column("acct", style="magenta")
+    table.add_column("name", style="bold")
+    table.add_column("status")
+    table.add_column("model")
+    table.add_column("cwd", style="grey70")
+    table.add_column("ctx", justify="right")
+    table.add_column("tokens", justify="right")
+    table.add_column("cost", justify="right")
+    table.add_column("age", justify="right")
+
+    for state in snapshot.sessions:
+        label, style = _STATUS_DISPLAY[state.status]
+        row = [
+            state.session.name or state.session.session_id[:8],
+            f"[{style}]{label}[/{style}]",
+            _format_model(state.model),
+            _short_cwd(state.session.cwd),
+            _format_context(state),
+            _format_tokens(state.totals.total_tokens),
+            _format_cost(state.totals.cost_usd),
+            _format_age(state.last_activity, snapshot.taken_at),
+        ]
+        if multi_account:
+            row.insert(0, state.account)
+        table.add_row(*row)
+
+    return table
+
+
+def _print_view(snapshot: FleetSnapshot, console: Console) -> None:
+    if snapshot.limits:
+        _render_limits(snapshot.limits, snapshot.taken_at, console)
+        console.print()
+
+    if not snapshot.sessions:
+        console.print("[grey50]No live Claude Code sessions found.[/grey50]")
+        return
+
+    multi_account = len({s.account for s in snapshot.sessions}) > 1
+    console.print(_render_table(snapshot, multi_account))
+    console.print(
+        f"[grey50]{len(snapshot.sessions)} sessions   "
+        f"{_format_tokens(snapshot.total_tokens)} tokens   "
+        f"${snapshot.total_cost_usd:.2f} total[/grey50]"
+    )
+
+
+def _window_to_dict(window: LimitWindow) -> dict:
+    return {
+        "kind": window.kind,
+        "label": window.label,
+        "percent": window.percent,
+        "severity": window.severity,
+        "is_active": window.is_active,
+        "has_data": window.has_data,
+        "resets_at": window.resets_at.isoformat() if window.resets_at else None,
+    }
+
+
+def _snapshot_to_dict(snapshot: FleetSnapshot) -> dict:
+    return {
+        "taken_at": snapshot.taken_at.isoformat(),
+        "total_cost_usd": snapshot.total_cost_usd,
+        "total_tokens": snapshot.total_tokens,
+        "limits": [
+            {
+                "account": a.account,
+                "tier": a.tier,
+                "source": a.source,
+                "error": a.error,
+                "fetched_at": a.fetched_at.isoformat() if a.fetched_at else None,
+                "windows": [_window_to_dict(w) for w in a.windows],
+            }
+            for a in snapshot.limits
+        ],
+        "sessions": [
+            {
+                "account": s.account,
+                "name": s.session.name,
+                "pid": s.session.pid,
+                "session_id": s.session.session_id,
+                "cwd": s.session.cwd,
+                "status": s.status.value,
+                "model": s.model,
+                "context_used_fraction": (s.context.used_fraction if s.context else None),
+                "total_tokens": s.totals.total_tokens,
+                "cost_usd": s.totals.cost_usd,
+                "last_activity": (s.last_activity.isoformat() if s.last_activity else None),
+            }
+            for s in snapshot.sessions
+        ],
+    }
+
+
+def _cmd_accounts() -> None:
+    """List the discovered accounts (read-only): tier and login status."""
+    from . import usage
+    from .registry import read_registry
+
+    console = Console()
+    table = Table(title="cctop accounts", title_style="bold", expand=False)
+    table.add_column("acct", style="magenta")
+    table.add_column("config dir", style="grey70")
+    table.add_column("tier")
+    table.add_column("token", justify="center")
+    table.add_column("live", justify="right")
+
+    for account in default_accounts():
+        tier = _tier_label(usage.read_tier(account.config_dir)) or "-"
+        has_token = usage.get_token(account.config_dir) is not None
+        live = sum(1 for _ in read_registry(account.config_dir))
+        table.add_row(
+            account.name,
+            str(account.config_dir).replace(str(Path.home()), "~"),
+            tier,
+            "[green]yes[/green]" if has_token else "[grey50]no[/grey50]",
+            str(live),
+        )
+    console.print(table)
+
+
+def _cmd_doctor(accounts: list[Account] | None = None) -> None:
+    """Read-only self-check for troubleshooting adoption issues.
+
+    Reports the platform, whether the claude/codex binaries and auth are found,
+    and each account's own credential, token expiry, tier, and live-session
+    count. Local reads only: it makes no network calls (so it cannot 429) and
+    never touches a credential beyond reading its expiry.
+    """
+    import platform as platform_module
+    import sys
+
+    from . import authctl, usage
+    from .codex_usage import CODEX_DIR
+    from .registry import read_registry
+
+    accounts = accounts if accounts is not None else default_accounts()
+    now = datetime.now(timezone.utc)
+    console = Console()
+
+    console.print("[bold]cctop doctor[/bold]  [grey50](read-only; no network)[/grey50]\n")
+    console.print(
+        f"platform   {platform_module.system()} {platform_module.release()}   "
+        f"Python {sys.version.split()[0]}"
+    )
+    binary = authctl.find_claude_binary()
+    console.print(f"claude     {binary or '[red]not found on PATH[/red]'}")
+    codex_auth = (CODEX_DIR / "auth.json").exists()
+    codex_note = "[green]auth present[/green]" if codex_auth else "[grey50]no auth[/grey50]"
+    console.print(f"codex      {codex_note}  ({str(CODEX_DIR).replace(str(Path.home()), '~')})\n")
+
+    table = Table(title="accounts", title_style="bold", expand=False)
+    for column in ("acct", "provider", "config dir", "token", "expires", "tier", "live"):
+        table.add_column(column)
+
+    for account in accounts:
+        config_display = str(account.config_dir).replace(str(Path.home()), "~")
+        if account.provider == "codex":
+            has_token = (CODEX_DIR / "auth.json").exists()
+            table.add_row(
+                account.name,
+                "codex",
+                config_display,
+                "[green]yes[/green]" if has_token else "[grey50]no[/grey50]",
+                "-",
+                "-",
+                "-",
+            )
+            continue
+
+        has_token = authctl.has_credentials(account.config_dir)
+        expiry = authctl.read_expiry(account.config_dir)
+        expires = _format_reset(expiry, now) if expiry else "-"
+        tier = _tier_label(usage.read_tier(account.config_dir)) or "-"
+        live = sum(1 for _ in read_registry(account.config_dir))
+        table.add_row(
+            account.name,
+            "claude",
+            config_display,
+            "[green]yes[/green]" if has_token else "[red]no[/red]",
+            expires,
+            tier,
+            str(live),
+        )
+
+    console.print(table)
+    console.print(
+        "\n[grey50]Usage limits and stats are fetched live in the TUI "
+        "(free, read-only); run [/grey50]cctop[grey50] to see them.[/grey50]"
+    )
+
+
+def reusable_logged_out_dir(home: Path) -> Path | None:
+    """The lowest-index existing `.claude-N` that has no credential of its own.
+
+    So an account created earlier but never signed into gets filled in on the
+    next add, instead of leaving it stranded and minting a fresh index. Uses the
+    strict per-config-dir credential check (never the shared default), so an
+    empty dir is not mistaken for logged-in.
+    """
+    from . import authctl
+
+    candidates = sorted(
+        (
+            path
+            for path in home.glob(".claude-*")
+            if path.is_dir() and path.name[len(".claude-") :].isdigit()
+        ),
+        key=lambda path: int(path.name[len(".claude-") :]),
+    )
+    for path in candidates:
+        if not authctl.has_credentials(path):
+            return path
+    return None
+
+
+def run_login(config_dir: Path, console: Console) -> bool:
+    """Run `claude auth login` for one account, interactively; True on success.
+
+    Scoped to config_dir via CLAUDE_CONFIG_DIR and its own per-dir Keychain
+    service, so signing in here can never read or overwrite another account's
+    credential. stdio is inherited so the browser OAuth flow works; cctop writes
+    nothing itself.
+    """
+    import os
+    import subprocess
+
+    from . import authctl
+
+    binary = authctl.find_claude_binary()
+    if binary is None:
+        console.print(
+            "[red]claude binary not found.[/red] Open the account manually and "
+            "run [bold]/login[/bold]."
+        )
+        return False
+
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(config_dir))
+    console.print(f"\n[bold]Signing in[/bold] [grey50](config dir {config_dir})[/grey50]\n")
+    try:
+        result = subprocess.run([binary, "auth", "login"], env=env)
+    except (OSError, KeyboardInterrupt):
+        return False
+    return result.returncode == 0
+
+
+def resolve_config_dir(spec: str) -> Path | None:
+    """Resolve an account spec to a config dir: a known account name or a path."""
+    for account in default_accounts():
+        if account.name == spec:
+            return account.config_dir
+    path = Path(spec).expanduser()
+    return path if path.is_dir() else None
+
+
+def _cmd_add_account(argv: list[str]) -> None:
+    """Provision a new account: create its config dir, optionally clone an
+    existing account's config, optionally set a shell alias, and (with --login)
+    sign in.
+
+    Dry-run by default. Aliasing never happens automatically: a shell alias is
+    written only when --alias NAME is given. --from clones an allowlist of user
+    config (CLAUDE.md, settings, commands...) from another account, never its
+    credentials, identity, or sessions. Strictly additive; login is isolated to
+    the new dir.
+    """
+    from . import manage
+
+    parser = argparse.ArgumentParser(prog="cctop add-account")
+    parser.add_argument(
+        "--from",
+        dest="source",
+        metavar="ACCOUNT",
+        default=None,
+        help="Clone user config (CLAUDE.md, settings, commands...) from this "
+        "account (name like cc-0, or a config-dir path).",
+    )
+    parser.add_argument(
+        "--alias",
+        metavar="NAME",
+        default=None,
+        help="Set this shell alias for the new account (opt-in; never automatic).",
+    )
+    parser.add_argument("--apply", action="store_true", help="Create the config dir.")
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help="Apply, then run the login flow for the new account (one-step setup).",
+    )
+    args = parser.parse_args(argv)
+
+    home = Path.home()
+    reuse_dir = reusable_logged_out_dir(home)
+    plan = manage.plan_add(home, args.alias, reuse_dir=reuse_dir)
+    console = Console()
+
+    source_dir = None
+    if args.source is not None:
+        source_dir = resolve_config_dir(args.source)
+        if source_dir is None:
+            console.print(f"[red]--from: unknown account or path '{args.source}'[/red]")
+            return
+        if source_dir == plan.config_dir:
+            console.print("[red]--from: source and destination are the same[/red]")
+            return
+
+    console.print(f"[bold]Add account[/bold]  config dir [magenta]{plan.config_dir}[/magenta]")
+    if source_dir is not None:
+        console.print(f"  clone from : {source_dir}  {list(manage.CONFIG_ALLOWLIST)}")
+    if args.alias is not None:
+        console.print(f"  alias      : {plan.alias_line}")
+    else:
+        console.print("  alias      : [grey50](none; pass --alias NAME to set one)[/grey50]")
+
+    if not args.apply and not args.login:
+        console.print(
+            "\n[grey50]Dry run. Add [/grey50][bold]--login[/bold][grey50] for one-step "
+            "setup (create dir, clone config, sign in), or [/grey50][bold]--apply[/bold]"
+            "[grey50] to create the dir only.[/grey50]"
+        )
+        return
+
+    console.print()
+    for action in manage.ensure_config_dir(plan.config_dir):
+        console.print(f"  [green]+[/green] {action}")
+    if source_dir is not None:
+        for action in manage.copy_config(source_dir, plan.config_dir):
+            console.print(f"  [green]+[/green] {action}")
+    if args.alias is not None:
+        for action in manage.set_alias(plan):
+            console.print(f"  [green]+[/green] {action}")
+
+    if not args.login:
+        hint = (
+            f"run [magenta]{args.alias}[/magenta]"
+            if args.alias
+            else (f"run [magenta]CLAUDE_CONFIG_DIR={plan.config_dir} claude[/magenta]")
+        )
+        console.print(
+            f"\n[bold]Next:[/bold] {hint} and [bold]/login[/bold] to sign in "
+            f"(or re-run with --login). cctop will pick it up automatically."
+        )
+        return
+
+    if run_login(plan.config_dir, console):
+        console.print("\n[green]Done.[/green] Signed in; cctop will pick it up automatically.")
+    else:
+        console.print(
+            "\n[grey50]Login not completed. The dir is set up; sign in when ready.[/grey50]"
+        )
+
+
+def _resolve_accounts(args: argparse.Namespace) -> list[Account]:
+    if args.account:
+        accounts = []
+        for spec in args.account:
+            name, _, path = spec.partition("=")
+            accounts.append(Account(name, Path(path).expanduser()))
+        return accounts
+    if args.config_dir is not None:
+        return [Account("default", args.config_dir)]
+    return default_accounts()
+
+
+def main() -> None:
+    import sys
+
+    argv = sys.argv[1:]
+    if argv[:1] == ["accounts"]:
+        _cmd_accounts()
+        return
+    if argv[:1] == ["add-account"]:
+        _cmd_add_account(argv[1:])
+        return
+    if argv[:1] == ["doctor"]:
+        _cmd_doctor()
+        return
+
+    parser = argparse.ArgumentParser(
+        prog="cctop",
+        description="Monitor multiple Claude Code sessions across accounts.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Print a single snapshot and exit (default in M0).",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the snapshot as JSON instead of a table.",
+    )
+    parser.add_argument(
+        "--account",
+        action="append",
+        metavar="NAME=DIR",
+        help="An account as name=config_dir (repeatable). "
+        "Default: cc-0=~/.claude, cc-1=~/.claude-1.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        type=Path,
+        default=None,
+        help="Single account shorthand: use this one config dir.",
+    )
+    parser.add_argument(
+        "--include-dead",
+        action="store_true",
+        help="Include sessions whose process has exited.",
+    )
+    parser.add_argument(
+        "--no-limits",
+        action="store_true",
+        help="Skip the free GET /api/oauth/usage fetch (no network, session table only).",
+    )
+    args = parser.parse_args()
+
+    accounts = _resolve_accounts(args)
+
+    if not args.once and not args.json:
+        # Default: launch the live TUI, which polls with its own throttles.
+        from .app import CctopApp
+
+        CctopApp(accounts).run()
+        return
+
+    now = datetime.now(timezone.utc)
+    snapshot = build_snapshot(
+        accounts,
+        now=now,
+        include_dead=args.include_dead,
+        with_limits=not args.no_limits,
+    )
+
+    if args.json:
+        print(json.dumps(_snapshot_to_dict(snapshot), indent=2))
+        return
+
+    _print_view(snapshot, Console())
+
+
+if __name__ == "__main__":
+    main()

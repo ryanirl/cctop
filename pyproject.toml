@@ -1,0 +1,75 @@
+[project]
+name = "cctop-tui"
+version = "0.1.0"
+description = "A live terminal monitor for multiple Claude Code and OpenAI Codex accounts, in the spirit of nvtop/htop."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ryan 'RyanIRL' Peters" }]
+keywords = [
+    "claude",
+    "claude-code",
+    "codex",
+    "anthropic",
+    "openai",
+    "tui",
+    "monitoring",
+    "usage",
+    "nvtop",
+    "cli",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+    "Topic :: System :: Monitoring",
+]
+dependencies = ["rich>=13.0", "textual>=0.60"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11", "pre-commit>=3.7"]
+
+[project.urls]
+Homepage = "https://github.com/ryanirl/cctop"
+Repository = "https://github.com/ryanirl/cctop"
+Issues = "https://github.com/ryanirl/cctop/issues"
+
+[project.scripts]
+cctop = "cctop.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cctop"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W", "C4"]
+# B008: several call sites legitimately use defaults from calls.
+# UP017: the code consistently uses timezone.utc; rewriting to datetime.UTC is
+# churn without benefit.
+ignore = ["B008", "UP017"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/cctop"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_redundant_casts = true
+no_implicit_optional = true
