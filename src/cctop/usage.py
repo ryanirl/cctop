@@ -14,7 +14,6 @@ Anthropic's own API. It is never logged or persisted.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import urllib.error
@@ -22,26 +21,17 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import authctl
 from .models import AccountLimits, LimitWindow
 
 API_BASE = "https://api.anthropic.com"
 USAGE_PATH = "/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
-KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 
 def _oauth_account(config_dir: Path) -> dict:
     """The oauthAccount block from an account's .claude.json (identifiers only)."""
-    path = (
-        Path.home() / ".claude.json"
-        if config_dir == Path.home() / ".claude"
-        else config_dir / ".claude.json"
-    )
-    try:
-        record = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    account = record.get("oauthAccount")
+    account = authctl.read_identity(config_dir).get("oauthAccount")
     return account if isinstance(account, dict) else {}
 
 
@@ -49,17 +39,6 @@ def read_tier(config_dir: Path) -> str | None:
     """The subscription tier string from .claude.json, e.g. default_claude_max_5x."""
     tier = _oauth_account(config_dir).get("organizationRateLimitTier")
     return tier if isinstance(tier, str) else None
-
-
-def _keychain_service(config_dir: Path) -> str:
-    """The per-config-dir Keychain service name Claude Code uses on macOS.
-
-    Verified empirically: `Claude Code-credentials-<first 8 hex of
-    sha256(config_dir_path)>`. This is how a second account (a different
-    CLAUDE_CONFIG_DIR) is kept distinct from the default in one Keychain.
-    """
-    digest = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
-    return f"{KEYCHAIN_SERVICE}-{digest}"
 
 
 def _token_from_credentials_file(config_dir: Path) -> str | None:
@@ -96,21 +75,15 @@ def get_token(config_dir: Path) -> str | None:
     """Resolve this account's OAuth token, keyed to its config dir (not the
     default).
 
-    Prefers an on-disk credentials file; otherwise looks up the per-config-dir
-    Keychain service, then the legacy default service. The default is last so a
-    single-account setup still works but never shadows a second account with the
-    first account's token.
+    Prefers an on-disk credentials file; otherwise looks up the Keychain service
+    that belongs to this config dir. There is deliberately no fallback to
+    another account's service, so a logged-out dir reads as having no token
+    rather than borrowing the default account's.
     """
     token = _token_from_credentials_file(config_dir)
     if token:
         return token
-    service = (
-        KEYCHAIN_SERVICE if config_dir == Path.home() / ".claude" else _keychain_service(config_dir)
-    )
-    token = _keychain_lookup(service)
-    if token:
-        return token
-    return None
+    return _keychain_lookup(authctl.keychain_service(config_dir))
 
 
 def _get(url: str, token: str) -> tuple[int | None, dict[str, str], str]:

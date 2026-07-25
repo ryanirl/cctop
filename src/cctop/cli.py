@@ -248,6 +248,23 @@ def _snapshot_to_dict(snapshot: FleetSnapshot) -> dict:
     }
 
 
+def _session_dir(
+    account: Account,
+    hot_switch: bool,
+    main_config_dir: Path,
+    active: Account | None,
+) -> Path | None:
+    """Where this account's live sessions actually run, or None if it has none.
+
+    In hot-switch mode every Claude session runs in the one main dir, so only
+    the active profile owns any; another profile's leftover registry would
+    otherwise be counted as that profile's own live sessions.
+    """
+    if hot_switch and account.provider == "claude":
+        return main_config_dir if account == active else None
+    return account.config_dir
+
+
 def _cmd_accounts() -> None:
     """List discovered profiles, login state, and the hot-switch active profile."""
     from . import config as config_module
@@ -255,9 +272,14 @@ def _cmd_accounts() -> None:
     from .registry import read_registry
     from .switcher import active_account
 
+    config = config_module.load_config()
+    hot_switch = config.hot_switch()
+    main_config_dir = config.main_config_dir()
+
     console = Console()
     table = Table(title="cctop accounts", title_style="bold", expand=False)
-    table.add_column("active", justify="center")
+    if hot_switch:
+        table.add_column("active", justify="center")
     table.add_column("acct", style="magenta")
     table.add_column("login dir", style="grey70")
     table.add_column("tier")
@@ -265,7 +287,7 @@ def _cmd_accounts() -> None:
     table.add_column("live", justify="right")
 
     accounts = default_accounts()
-    current = active_account(accounts, config_module.load_config().main_config_dir())
+    current = active_account(accounts, main_config_dir) if hot_switch else None
     for account in accounts:
         if account.provider == "codex":
             tier = "-"
@@ -273,15 +295,18 @@ def _cmd_accounts() -> None:
         else:
             tier = _tier_label(usage.read_tier(account.auth_dir)) or "-"
             has_token = usage.get_token(account.auth_dir) is not None
-        live = sum(1 for _ in read_registry(account.config_dir))
-        table.add_row(
-            "[green]*[/green]" if account == current else "",
+        session_dir = _session_dir(account, hot_switch, main_config_dir, current)
+        live = sum(1 for _ in read_registry(session_dir)) if session_dir else 0
+        row = [
             account.name,
             str(account.auth_dir).replace(str(Path.home()), "~"),
             tier,
             "[green]yes[/green]" if has_token else "[grey50]no[/grey50]",
             str(live),
-        )
+        ]
+        if hot_switch:
+            row.insert(0, "[green]*[/green]" if account == current else "")
+        table.add_row(*row)
     console.print(table)
 
 
@@ -297,10 +322,16 @@ def _cmd_doctor(accounts: list[Account] | None = None) -> None:
     import sys
 
     from . import authctl, usage
+    from . import config as config_module
     from .codex_usage import CODEX_DIR
     from .registry import read_registry
+    from .switcher import active_account
 
     accounts = accounts if accounts is not None else default_accounts()
+    config = config_module.load_config()
+    hot_switch = config.hot_switch()
+    main_config_dir = config.main_config_dir()
+    current = active_account(accounts, main_config_dir) if hot_switch else None
     now = datetime.now(timezone.utc)
     console = Console()
 
@@ -316,11 +347,13 @@ def _cmd_doctor(accounts: list[Account] | None = None) -> None:
     console.print(f"codex      {codex_note}  ({str(CODEX_DIR).replace(str(Path.home()), '~')})\n")
 
     table = Table(title="accounts", title_style="bold", expand=False)
-    for column in ("acct", "provider", "config dir", "token", "expires", "tier", "live"):
+    for column in ("acct", "provider", "login dir", "token", "expires", "tier", "live"):
         table.add_column(column)
 
     for account in accounts:
-        config_display = str(account.config_dir).replace(str(Path.home()), "~")
+        # The login dir, not the session dir: it is where the token, expiry, and
+        # tier reported on this row were actually read from.
+        config_display = str(account.auth_dir).replace(str(Path.home()), "~")
         if account.provider == "codex":
             has_token = (CODEX_DIR / "auth.json").exists()
             table.add_row(
@@ -338,7 +371,8 @@ def _cmd_doctor(accounts: list[Account] | None = None) -> None:
         expiry = authctl.read_expiry(account.auth_dir)
         expires = _format_reset(expiry, now) if expiry else "-"
         tier = _tier_label(usage.read_tier(account.auth_dir)) or "-"
-        live = sum(1 for _ in read_registry(account.config_dir))
+        session_dir = _session_dir(account, hot_switch, main_config_dir, current)
+        live = sum(1 for _ in read_registry(session_dir)) if session_dir else 0
         table.add_row(
             account.name,
             "claude",
@@ -550,13 +584,25 @@ def _config_template() -> str:
 
 
 def _cmd_switch(argv: list[str]) -> None:
-    """Hot-switch the main Claude sessions to a saved profile."""
+    """Hot-switch the main Claude sessions to a saved profile.
+
+    `cctop switch NAME` activates that profile; with no name, the healthy
+    profile with the most headroom. Both change live credential state, so an
+    unrecognized argument must not be silently read as a profile name.
+    """
     from . import config as config_module
     from .collect import account_limits
     from .switcher import best_account, ensure_stable_accounts, switch_account
 
-    config = config_module.load_config()
     console = Console()
+    if len(argv) > 1 or (argv and argv[0].startswith("-")):
+        console.print("usage: [bold]cctop switch [NAME][/bold]")
+        console.print(
+            "[grey50]with no NAME, picks the healthy profile with the most headroom[/grey50]"
+        )
+        return
+
+    config = config_module.load_config()
     if not config.hot_switch():
         console.print(
             "[red]hot switching is disabled.[/red] Set "
@@ -835,7 +881,7 @@ def main() -> None:
             heatmap_weeks=cfg.heatmap_weeks(26),
             main_config_dir=cfg.main_config_dir(),
             auto_switch_remaining_percent=cfg.auto_switch_remaining_percent(),
-            hot_switch=cfg.hot_switch(),
+            hot_switch=configured_hot_switch,
         ).run()
         return
 

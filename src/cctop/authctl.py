@@ -55,7 +55,14 @@ def find_claude_binary() -> str | None:
     return str(_BINARY_FALLBACK) if _BINARY_FALLBACK.exists() else None
 
 
-def _keychain_service(config_dir: Path) -> str:
+def keychain_service(config_dir: Path) -> str:
+    """The Keychain service name Claude Code uses for a profile on macOS.
+
+    Verified empirically: the default ``~/.claude`` profile owns the bare
+    service name, and every other CLAUDE_CONFIG_DIR gets
+    ``Claude Code-credentials-<first 8 hex of sha256(config_dir_path)>``, which
+    is how a second account stays distinct from the default in one Keychain.
+    """
     if config_dir == Path.home() / ".claude":
         return _KEYCHAIN_SERVICE
     digest = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
@@ -133,7 +140,7 @@ def read_credentials(config_dir: Path) -> str:
         if isinstance(payload.get("claudeAiOauth"), dict):
             return raw
 
-    keychain_raw = _keychain_read(_keychain_service(config_dir))
+    keychain_raw = _keychain_read(keychain_service(config_dir))
     if keychain_raw is None:
         raise CredentialError(f"no credential found for {config_dir}")
     try:
@@ -161,7 +168,7 @@ def write_credentials(config_dir: Path, credential: str) -> None:
         os.chmod(temporary, 0o600)
         os.replace(temporary, credentials_file)
         return
-    _keychain_write(_keychain_service(config_dir), credential)
+    _keychain_write(keychain_service(config_dir), credential)
 
 
 def read_expiry(config_dir: Path) -> datetime | None:
@@ -300,7 +307,7 @@ def refresh(account: str, config_dir: Path, now: datetime | None = None) -> Refr
 
     after = read_expiry(config_dir)
     if after is None or after <= now:
-        return RefreshResult(account, False, "saved login needs re-login attention", after)
+        return RefreshResult(account, False, "needs re-login - refresh token itself is dead", after)
 
     renewed = before is None or after > before
     verb = "refreshed" if renewed else "already valid"

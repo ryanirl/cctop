@@ -14,6 +14,9 @@ from .collect import Account
 from .locks import claude_lock
 from .models import AccountLimits
 
+# Usage a profile must be under to be worth switching into on demand.
+HEALTHY_PERCENT = 99.0
+
 
 @dataclass(frozen=True)
 class SwitchResult:
@@ -46,7 +49,16 @@ def active_account(accounts: list[Account], main_config_dir: Path) -> Account | 
     )
 
 
-def _write_main_identity(main_config_dir: Path, source_config_dir: Path) -> None:
+def _stage_main_identity(main_config_dir: Path, source_config_dir: Path) -> Path:
+    """Prepare the post-switch main identity file, without publishing it yet.
+
+    Staged before any credential moves so a source with no usable identity
+    aborts the switch while nothing has changed, and published by a single
+    rename after the credentials land.  Credential and identity must never
+    disagree: a main store holding one account's token while the identity names
+    another would make the next sync copy that token over the other account's
+    saved profile, destroying a login.
+    """
     source_oauth = authctl.read_identity(source_config_dir).get("oauthAccount")
     if not isinstance(source_oauth, dict) or not source_oauth.get("organizationUuid"):
         raise authctl.CredentialError(f"{source_config_dir} has no saved account identity")
@@ -62,7 +74,21 @@ def _write_main_identity(main_config_dir: Path, source_config_dir: Path) -> None
     temporary = path.with_suffix(path.suffix + ".cctop-new")
     temporary.write_text(json.dumps(main, separators=(",", ":")))
     os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    return temporary
+
+
+def _write_credential(config_dir: Path, credential: str) -> None:
+    """Install a credential record, skipping the write when it is already there.
+
+    A Keychain-backed profile costs a ``security`` subprocess per write and the
+    active-profile sync runs on every limits poll, so no-op writes are dropped.
+    """
+    try:
+        if authctl.read_credentials(config_dir) == credential:
+            return
+    except authctl.CredentialError:
+        pass
+    authctl.write_credentials(config_dir, credential)
 
 
 def _managed_profile_name(identity: dict) -> str:
@@ -115,7 +141,7 @@ def ensure_stable_accounts(accounts: list[Account], main_config_dir: Path) -> li
             managed_file = profile_dir / ".credentials.json"
             if not managed_file.exists():
                 managed_file.touch(mode=0o600)
-        authctl.write_credentials(profile_dir, credential)
+        _write_credential(profile_dir, credential)
 
     return [
         replace(account, credential_dir=profile_dir) if account == current else account
@@ -155,11 +181,14 @@ def switch_account(
                 stack.enter_context(claude_lock(config_dir))
             stack.enter_context(claude_lock(authctl.identity_path(main_config_dir)))
             target_credential = authctl.read_credentials(target.auth_dir)
-            if previous is not None:
-                current = authctl.read_credentials(main_config_dir)
-                authctl.write_credentials(previous.auth_dir, current)
-            authctl.write_credentials(main_config_dir, target_credential)
-            _write_main_identity(main_config_dir, target.auth_dir)
+            staged_identity = _stage_main_identity(main_config_dir, target.auth_dir)
+            try:
+                if previous is not None:
+                    _write_credential(previous.auth_dir, authctl.read_credentials(main_config_dir))
+                _write_credential(main_config_dir, target_credential)
+                os.replace(staged_identity, authctl.identity_path(main_config_dir))
+            finally:
+                staged_identity.unlink(missing_ok=True)
     except (authctl.CredentialError, OSError, TimeoutError) as error:
         return SwitchResult(
             False,
@@ -184,8 +213,7 @@ def sync_active_profile(accounts: list[Account], main_config_dir: Path) -> Switc
         with ExitStack() as stack:
             for config_dir in sorted({main_config_dir, current.auth_dir}, key=str):
                 stack.enter_context(claude_lock(config_dir))
-            credential = authctl.read_credentials(main_config_dir)
-            authctl.write_credentials(current.auth_dir, credential)
+            _write_credential(current.auth_dir, authctl.read_credentials(main_config_dir))
     except (authctl.CredentialError, OSError, TimeoutError) as error:
         return SwitchResult(False, current.name, current.name, str(error))
     return SwitchResult(True, current.name, current.name, f"synced {current.name}")
@@ -200,8 +228,12 @@ def best_account(
     accounts: list[Account],
     limits: list[AccountLimits],
     main_config_dir: Path,
+    max_percent: float = HEALTHY_PERCENT,
 ) -> Account | None:
-    """The non-active Claude profile with the most limit headroom."""
+    """The non-active Claude profile with the most limit headroom.
+
+    ``max_percent`` is the usage a candidate must be under to count as healthy.
+    """
     current = active_account(accounts, main_config_dir)
     by_name = {item.account: item for item in limits}
     candidates: list[tuple[float, Account]] = []
@@ -213,7 +245,7 @@ def best_account(
             AccountLimits("", None, [], "none", None),
         )
         percent = _binding_percent(limits_for_account)
-        if percent is not None and percent < 99.0:
+        if percent is not None and percent < max_percent:
             candidates.append((percent, account))
     return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
@@ -224,15 +256,27 @@ def auto_switch(
     main_config_dir: Path,
     remaining_percent: float,
 ) -> SwitchResult | None:
-    """Rotate when the active profile has at most ``remaining_percent`` left."""
+    """Rotate when the active profile has at most ``remaining_percent`` left.
+
+    A candidate must be under the same threshold that triggered the rotation,
+    not merely under a fixed ceiling: swapping in a profile that is itself past
+    the trigger would re-fire on the next poll and ping-pong between two equally
+    exhausted logins.
+    """
     current = active_account(accounts, main_config_dir)
     if current is None:
         return None
+    trigger = 100.0 - remaining_percent
     current_limits = next((item for item in limits if item.account == current.name), None)
     used = _binding_percent(current_limits) if current_limits is not None else None
-    if used is None or used < 100.0 - remaining_percent:
+    if used is None or used < trigger:
         return None
-    target = best_account(accounts, limits, main_config_dir)
+    target = best_account(accounts, limits, main_config_dir, min(HEALTHY_PERCENT, trigger))
     if target is None:
-        return SwitchResult(False, current.name, current.name, "1% remaining; no healthy profile")
+        return SwitchResult(
+            False,
+            current.name,
+            current.name,
+            f"{remaining_percent:g}% remaining; no healthy profile",
+        )
     return switch_account(accounts, target, main_config_dir)

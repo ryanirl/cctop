@@ -81,7 +81,7 @@ def _provider_for(config_dir: Path) -> str:
     return "codex" if "codex" in config_dir.name.lower() else "claude"
 
 
-def discover_accounts() -> list[Account]:
+def discover_accounts(include_managed: bool = False) -> list[Account]:
     """Every account auto-detected under the home dir.
 
     ~/.claude is cc-0; any ~/.claude-<suffix> that looks like a real config dir
@@ -89,6 +89,11 @@ def discover_accounts() -> list[Account]:
     ~/.claude-work become cc-work), so it is not limited to the numeric shell-
     alias convention. ~/.codex is added as cx-0. Discovering by glob means a new
     account appears automatically, with no hardcoded list to maintain.
+
+    `include_managed` additionally surfaces cctop's own snapshotted login
+    profiles. They are only meaningful in hot-switch mode, where deduplication
+    folds each one back into the account it was snapshotted from; anywhere else
+    they would double every such account, so they stay hidden by default.
     """
     home = Path.home()
     found: list[tuple[tuple[int, str], Account]] = []
@@ -107,13 +112,14 @@ def discover_accounts() -> list[Account]:
     # Profiles snapshotted automatically from the mutable main login live under
     # cctop's own config directory, outside ~/.claude-* so Claude never treats
     # them as session homes. They re-enter discovery here on later runs.
-    from . import config as config_module
+    if include_managed:
+        from . import config as config_module
 
-    managed_root = config_module.config_dir() / "profiles"
-    if managed_root.is_dir():
-        for path in managed_root.iterdir():
-            if path.is_dir() and _looks_like_config_dir(path):
-                found.append(((20_000, path.name), Account(f"cc-{path.name}", path)))
+        managed_root = config_module.config_dir() / "profiles"
+        if managed_root.is_dir():
+            for path in managed_root.iterdir():
+                if path.is_dir() and _looks_like_config_dir(path):
+                    found.append(((20_000, path.name), Account(f"cc-{path.name}", path)))
 
     found.sort(key=lambda item: item[0])
     accounts = [account for _, account in found] or [Account("default", default_config_dir())]
@@ -136,11 +142,12 @@ def resolve_accounts(config=None) -> list[Account]:
 
     if config is None:
         config = config_module.load_config()
+    hot_switch = config.hot_switch()
     overrides = {override.dir: override for override in config.accounts}
 
     result: list[Account] = []
     seen: set[Path] = set()
-    for account in discover_accounts():
+    for account in discover_accounts(include_managed=hot_switch):
         seen.add(account.config_dir)
         override = overrides.get(account.config_dir)
         if override is not None and override.hidden:
@@ -166,7 +173,7 @@ def resolve_accounts(config=None) -> list[Account]:
             )
         )
 
-    if config.hot_switch():
+    if hot_switch:
         return _deduplicate_hot_accounts(result, config.main_config_dir())
     return result
 

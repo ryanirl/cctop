@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import authctl
 from .authctl import RefreshResult
@@ -18,6 +19,10 @@ from .collect import Account, _effective_status, account_limits, codex_session_s
 from .models import AccountLimits, FleetSnapshot, SessionState, UsageTotals
 from .registry import process_alive, read_registry
 from .transcript import TranscriptTailer, find_transcript
+
+if TYPE_CHECKING:
+    # Imported lazily at runtime: switching is only reachable in hot-switch mode.
+    from .switcher import SwitchResult
 
 # Usage windows move slowly (a 5h window shifts well under 1%/min, weekly ones
 # barely at all), so poll a few minutes apart rather than every minute: fresh
@@ -78,7 +83,12 @@ class FleetMonitor:
         return tailer
 
     def poll_sessions(self, now: datetime | None = None) -> list[SessionState]:
-        """Read the one main Claude session registry plus any Codex sessions."""
+        """Rebuild the live session list, advancing each tailer by new bytes.
+
+        Claude sessions come from each account's own config dir, or -- in
+        hot-switch mode, where every session runs in one directory -- from the
+        main dir alone, attributed to whichever profile is currently active.
+        """
         now = now or datetime.now(timezone.utc)
 
         codex_due = self._codex_polled_at is None or now - self._codex_polled_at >= CODEX_INTERVAL
@@ -148,8 +158,8 @@ class FleetMonitor:
         states.sort(key=lambda state: state.last_activity or now, reverse=True)
         return states
 
-    def maybe_auto_switch(self):
-        """Apply the configured 1%-remaining rotation policy to cached limits."""
+    def maybe_auto_switch(self) -> SwitchResult | None:
+        """Apply the configured remaining-headroom rotation policy to cached limits."""
         if not self.hot_switch:
             return None
         from .switcher import auto_switch
@@ -161,7 +171,7 @@ class FleetMonitor:
             self.auto_switch_remaining_percent,
         )
 
-    def switch_best(self):
+    def switch_best(self) -> SwitchResult | None:
         """Hot-switch to the currently healthiest saved Claude profile."""
         if not self.hot_switch:
             return None

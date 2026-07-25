@@ -133,10 +133,9 @@ def test_best_account_chooses_most_headroom_and_skips_active(tmp_path: Path) -> 
     _profile(c, "org-c", "c")
     accounts = [Account("a", a), Account("b", b), Account("c", c)]
 
-    assert (
-        best_account(accounts, [_limits("a", 99), _limits("b", 40), _limits("c", 10)], main)
-        == (accounts[2])
-    )
+    chosen = best_account(accounts, [_limits("a", 99), _limits("b", 40), _limits("c", 10)], main)
+
+    assert chosen == accounts[2]
 
 
 def test_auto_switch_fires_at_one_percent_remaining(tmp_path: Path) -> None:
@@ -152,3 +151,55 @@ def test_auto_switch_fires_at_one_percent_remaining(tmp_path: Path) -> None:
 
     assert result is not None and result.ok is True
     assert result.active == "b"
+
+
+def test_auto_switch_refuses_a_target_past_the_same_threshold(tmp_path: Path) -> None:
+    """A candidate that would re-trigger the rotation is not an escape."""
+    main = tmp_path / "main"
+    a, b = tmp_path / "a", tmp_path / "b"
+    _profile(main, "org-a", "rotated-a")
+    _profile(a, "org-a", "saved-a")
+    _profile(b, "org-b", "token-b")
+    accounts = [Account("a", a), Account("b", b)]
+
+    result = auto_switch(accounts, [_limits("a", 92), _limits("b", 95)], main, 10.0)
+
+    assert result is not None and result.ok is False
+    assert "no healthy profile" in result.message
+    assert active_account(accounts, main) == accounts[0]
+
+
+def test_switch_leaves_credential_and_identity_agreeing_when_it_fails(tmp_path: Path) -> None:
+    """A target with no identity must not strand the target's token in main."""
+    main = tmp_path / "main"
+    previous = tmp_path / "saved-a"
+    target = tmp_path / "saved-b"
+    _profile(main, "org-a", "rotated-a")
+    _profile(previous, "org-a", "stale-a")
+    _profile(target, "org-b", "token-b")
+    (target / ".claude.json").write_text(json.dumps({"oauthAccount": {}}))
+    accounts = [Account("a", previous), Account("b", target)]
+
+    result = switch_account(accounts, accounts[1], main)
+
+    assert result.ok is False
+    assert active_account(accounts, main) == accounts[0]
+    # Main still holds account a's token, matching the identity it still claims,
+    # so the next sync cannot copy b's token over a's saved profile.
+    assert (
+        json.loads((main / ".credentials.json").read_text())["claudeAiOauth"]["accessToken"]
+        == "rotated-a"
+    )
+    assert not list(main.glob("*.cctop-new"))
+
+
+def test_sync_skips_the_write_when_the_profile_is_already_current(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    saved = tmp_path / "saved"
+    _profile(main, "org-a", "token-a")
+    _profile(saved, "org-a", "token-a")
+    credentials = saved / ".credentials.json"
+    before = credentials.stat().st_mtime_ns
+
+    assert sync_active_profile([Account("a", saved)], main) is not None
+    assert credentials.stat().st_mtime_ns == before

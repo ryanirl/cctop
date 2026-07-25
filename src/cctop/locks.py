@@ -35,9 +35,11 @@ def claude_lock(target: Path, timeout: float = TIMEOUT_SECONDS):
         if stale:
             try:
                 os.rmdir(lock_dir)
+                continue
             except OSError:
+                # A lock dir we cannot reap (not empty, not ours to remove) must
+                # not turn the wait into a spin; back off like a live holder.
                 pass
-            continue
         time.sleep(0.25 + random.random() * 0.25)
 
     stopped = threading.Event()
@@ -58,5 +60,7 @@ def claude_lock(target: Path, timeout: float = TIMEOUT_SECONDS):
         thread.join(timeout=1)
         try:
             os.rmdir(lock_dir)
-        except FileNotFoundError:
+        except OSError:
+            # Releasing is best effort: the work inside already succeeded or
+            # raised, and a stuck lock dir is reaped by the next waiter.
             pass

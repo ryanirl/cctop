@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich.console import Group
 from rich.table import Table as RichTable
@@ -43,6 +44,9 @@ from .cli import (
 from .collect import Account
 from .models import AccountLimits, LimitWindow, SessionState
 from .monitor import FleetMonitor
+
+if TYPE_CHECKING:
+    from .switcher import SwitchResult
 
 TEAL = "#20B2AA"
 DIM = "grey37"
@@ -510,7 +514,7 @@ class CctopApp(App):
             return
         self.call_from_thread(self._show_switch_result, result, "account switch")
 
-    def _show_switch_result(self, result, title: str) -> None:
+    def _show_switch_result(self, result: SwitchResult, title: str) -> None:
         self.notify(
             result.message,
             title=title,
@@ -521,7 +525,15 @@ class CctopApp(App):
             self._tick_sessions()
 
     def action_add_account(self) -> None:
-        """Provision a separate-config account using the original workflow."""
+        """Provision an account and sign in, without leaving cctop.
+
+        Suspends the dashboard to hand the terminal to two optional prompts
+        (clone config from an existing account; set a shell alias) and the
+        interactive login, then rediscovers accounts so the new one shows
+        immediately. Everything is explicit and additive: nothing is aliased or
+        cloned unless typed in, the clone is an allowlist (never credentials or
+        state), and the login is scoped to the one new config dir.
+        """
         from rich.console import Console
 
         from . import manage
@@ -541,11 +553,7 @@ class CctopApp(App):
             ).strip()
             alias = console.input("Shell alias to set? [blank=none]: ").strip()
 
-            plan = manage.plan_add(
-                home,
-                alias or None,
-                reuse_dir=reusable_logged_out_dir(home),
-            )
+            plan = manage.plan_add(home, alias or None, reuse_dir=reusable_logged_out_dir(home))
             source_dir = resolve_config_dir(source_spec) if source_spec else None
             if source_spec and (source_dir is None or source_dir == plan.config_dir):
                 console.print(f"[red]skipping clone: '{source_spec}' not usable[/red]")

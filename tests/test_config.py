@@ -23,7 +23,7 @@ def test_load_config_parses_settings_and_accounts(tmp_path: Path) -> None:
         'main_config_dir = "~/.claude-main"\n'
         "hot_switch = true\n"
         "auto_switch_remaining_percent = 1\n\n"
-        '[[account]]\nname = "work"\ndir = "~/.claude"\n\n'
+        '[[account]]\nname = "work"\ndir = "~/.claude"\n'
         'switch_dir = "~/.claude-work-saved"\n\n'
         '[[account]]\ndir = "~/.claude-9"\nhidden = true\n'
     )
@@ -54,7 +54,7 @@ def test_limits_refresh_default_fallback(tmp_path: Path) -> None:
 # -- resolve: config overrides layered over auto-detection ---------------------
 
 
-def _detected() -> list[Account]:
+def _detected(include_managed: bool = False) -> list[Account]:
     home = Path.home()
     return [
         Account("cc-0", home / ".claude", "claude"),
@@ -68,7 +68,7 @@ def test_resolve_renames_hides_and_adds(monkeypatch) -> None:
     home = Path.home()
     config = cfg.Config(
         accounts=[
-            cfg.AccountOverride(
+            cfg.AccountOverride(  # rename, with a saved login dir
                 dir=home / ".claude",
                 name="work",
                 switch_dir=home / ".claude-work-saved",
@@ -109,7 +109,7 @@ def test_hot_switch_matches_duplicate_logins_without_account_mapping(
     monkeypatch.setattr(
         collect,
         "discover_accounts",
-        lambda: [
+        lambda include_managed=False: [
             Account("cc-0", main),
             Account("cc-saved", saved),
             Account("cc-other", other),
@@ -136,6 +136,22 @@ def test_discover_catches_named_dirs(tmp_path: Path, monkeypatch) -> None:
 
     names = [a.name for a in collect.discover_accounts()]
     assert "cc-0" in names and "cc-1" in names and "cc-work" in names
+
+
+def test_managed_profiles_stay_hidden_outside_hot_switch(tmp_path: Path, monkeypatch) -> None:
+    """Snapshotted logins would otherwise double the account they came from."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    (tmp_path / ".claude" / "sessions").mkdir(parents=True)
+    managed = cfg.config_dir() / "profiles" / "org-a"
+    managed.mkdir(parents=True)
+    (managed / ".claude.json").write_text('{"oauthAccount":{"organizationUuid":"org-a"}}')
+
+    assert [a.name for a in collect.discover_accounts()] == ["cc-0"]
+    assert [a.config_dir for a in collect.discover_accounts(include_managed=True)] == [
+        tmp_path / ".claude",
+        managed,
+    ]
 
 
 # -- config init ---------------------------------------------------------------

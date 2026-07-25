@@ -16,8 +16,7 @@ Everything is read from files the tools already write plus a couple of free,
 read-only usage reads; nothing here ever spends message quota. cctop touches
 your credentials only for those reads and optional local hot switching, never
 logs or transmits a token, and otherwise changes state only through explicit
-account actions. See
-[SECURITY.md](SECURITY.md) for the full trust statement.
+account actions. See [SECURITY.md](SECURITY.md) for the full trust statement.
 
 ![cctop](https://raw.githubusercontent.com/ryanirl/cctop/main/docs/hero.png)
 
@@ -130,14 +129,26 @@ the macOS Keychain cache refreshes.
 While the TUI is running, cctop automatically chooses the healthy Claude
 profile with the most headroom when the active profile reaches 1% remaining
 (99% used). This threshold is configurable with
-`auto_switch_remaining_percent`. Disable `hot_switch` at any time to return to
-the original per-directory session view.
+`auto_switch_remaining_percent`; a profile that is itself past the threshold is
+never chosen, so cctop reports that no healthy profile is left rather than
+rotating between two exhausted logins. Disable `hot_switch` at any time to
+return to the original per-directory session view — the saved profiles cctop
+manages for itself stay out of the account list while it is off.
+
+Keeping the saved profile in sync is what avoids re-logins: an access token
+lasts ~12-15h, but the refresh token behind it is what actually keeps an
+account alive, and it rotates as Claude Code uses it. cctop copies the current
+main credential back to its saved profile before every swap and on every limits
+poll, so a profile is never reactivated with a superseded refresh token. Only a
+refresh token that is genuinely dead needs `/login` again, and nothing local can
+substitute for that OAuth round trip.
 
 ### Configuration (optional)
 
 cctop needs no configuration. If you want to rename, hide, reorder, or add
-accounts (for a nonstandard directory that auto-detection cannot find), generate
-a starter file and edit it:
+accounts (for a layout auto-detection can't guess, like a config dir in a custom
+location or one managed by an account switcher), generate a starter file and
+edit it:
 
 ```bash
 cctop config init     # writes ~/.config/cctop/config.toml, pre-filled with what it detected

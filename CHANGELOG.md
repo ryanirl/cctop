@@ -12,11 +12,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   current-token sync-back, `cctop switch [NAME]`, and the TUI `x` key.
 - Automatic rotation to the healthy Claude profile with the most headroom at
   1% remaining (configurable), including delegated refresh of expired saved
-  access tokens without a login/logout cycle.
+  access tokens without a login/logout cycle. A profile past the same threshold
+  is not treated as an escape, so a fleet with no headroom left says so instead
+  of rotating between exhausted logins.
+
+### Changed
+- `get_token` no longer falls back to the default account's Keychain service, so
+  a logged-out config dir reads as having no token instead of borrowing the
+  default account's. The default-profile Keychain and identity-path rules now
+  live in one place (`authctl`) instead of being restated per call site.
 
 ### Preserved
 - Original per-config-directory session monitoring and account provisioning
-  remain the default behavior when `hot_switch` is disabled.
+  remain the default behavior when `hot_switch` is disabled; the login profiles
+  cctop snapshots for itself are hidden from account discovery while it is off.
 
 ## [0.2.0] - 2026-07-19
 
