@@ -10,6 +10,7 @@ fetch so the free-but-networked limits call runs on its own slower cadence.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from . import authctl
 from .authctl import RefreshResult
@@ -29,6 +30,7 @@ CODEX_INTERVAL = timedelta(seconds=5)
 # here, double each consecutive failure, cap so it always recovers eventually.
 _BACKOFF_BASE = timedelta(seconds=60)
 _BACKOFF_CAP = timedelta(minutes=15)
+_AUTH_RETRY = timedelta(minutes=15)
 
 _EMPTY_TOTALS = UsageTotals(0, 0, 0, 0, 0.0)
 
@@ -40,9 +42,15 @@ class FleetMonitor:
         self,
         accounts: list[Account],
         limits_interval: timedelta = DEFAULT_LIMITS_INTERVAL,
+        main_config_dir: Path | None = None,
+        auto_switch_remaining_percent: float = 1.0,
+        hot_switch: bool = False,
     ) -> None:
         self.accounts = accounts
         self.limits_interval = limits_interval
+        self.main_config_dir = main_config_dir or Path.home() / ".claude"
+        self.auto_switch_remaining_percent = auto_switch_remaining_percent
+        self.hot_switch = hot_switch
 
         self._tailers: dict[str, TranscriptTailer] = {}
         self.limits: list[AccountLimits] = []
@@ -56,6 +64,7 @@ class FleetMonitor:
         self._good_limits: dict[str, AccountLimits] = {}
         self._cooldown_until: dict[str, datetime] = {}
         self._backoff: dict[str, timedelta] = {}
+        self._auth_retry_after: dict[str, datetime] = {}
 
     def _tailer_for(self, config_dir, session_id: str) -> TranscriptTailer | None:
         """The live tailer for a session, created (and its file located) once."""
@@ -69,31 +78,27 @@ class FleetMonitor:
         return tailer
 
     def poll_sessions(self, now: datetime | None = None) -> list[SessionState]:
-        """Rebuild the live session list, advancing each tailer by new bytes."""
+        """Read the one main Claude session registry plus any Codex sessions."""
         now = now or datetime.now(timezone.utc)
 
         codex_due = self._codex_polled_at is None or now - self._codex_polled_at >= CODEX_INTERVAL
 
         states: list[SessionState] = []
         seen: set[str] = set()
-        for account in self.accounts:
-            if account.provider == "codex":
-                if codex_due:
-                    self._codex_cache[account.name] = codex_session_states(account, now)
-                states.extend(self._codex_cache.get(account.name, []))
-                continue
-            for session in read_registry(account.config_dir):
+
+        def append_claude(config_dir: Path, account_name: str) -> None:
+            for session in read_registry(config_dir):
                 if not process_alive(session.pid):
                     continue
                 seen.add(session.session_id)
                 status = _effective_status(session, True, now)
 
-                tailer = self._tailer_for(account.config_dir, session.session_id)
+                tailer = self._tailer_for(config_dir, session.session_id)
                 if tailer is None:
                     states.append(
                         SessionState(
                             session=session,
-                            account=account.name,
+                            account=account_name,
                             alive=True,
                             status=status,
                             model=None,
@@ -108,7 +113,7 @@ class FleetMonitor:
                 states.append(
                     SessionState(
                         session=session,
-                        account=account.name,
+                        account=account_name,
                         alive=True,
                         status=status,
                         model=tailer.model,
@@ -117,6 +122,20 @@ class FleetMonitor:
                         last_activity=tailer.last_activity or session.updated_at,
                     )
                 )
+
+        for account in self.accounts:
+            if account.provider == "codex":
+                if codex_due:
+                    self._codex_cache[account.name] = codex_session_states(account, now)
+                states.extend(self._codex_cache.get(account.name, []))
+            elif not self.hot_switch:
+                append_claude(account.config_dir, account.name)
+
+        if self.hot_switch:
+            from .switcher import active_account
+
+            active = active_account(self.accounts, self.main_config_dir)
+            append_claude(self.main_config_dir, active.name if active is not None else "main")
 
         if codex_due:
             self._codex_polled_at = now
@@ -128,6 +147,30 @@ class FleetMonitor:
 
         states.sort(key=lambda state: state.last_activity or now, reverse=True)
         return states
+
+    def maybe_auto_switch(self):
+        """Apply the configured 1%-remaining rotation policy to cached limits."""
+        if not self.hot_switch:
+            return None
+        from .switcher import auto_switch
+
+        return auto_switch(
+            self.accounts,
+            self.limits,
+            self.main_config_dir,
+            self.auto_switch_remaining_percent,
+        )
+
+    def switch_best(self):
+        """Hot-switch to the currently healthiest saved Claude profile."""
+        if not self.hot_switch:
+            return None
+        from .switcher import best_account, switch_account
+
+        target = best_account(self.accounts, self.limits, self.main_config_dir)
+        if target is None:
+            return None
+        return switch_account(self.accounts, target, self.main_config_dir)
 
     def limits_due(self, now: datetime) -> bool:
         if self.limits_fetched_at is None:
@@ -154,6 +197,25 @@ class FleetMonitor:
             )
 
         result = account_limits(account)
+
+        # In hot-switch mode every saved login must remain ready to activate.
+        # Let Claude Code refresh an expired access token itself; this needs no
+        # login unless the saved refresh token is genuinely dead. Bound retries
+        # so a dead login never spawns a command on every limits poll.
+        auth_retry = self._auth_retry_after.get(name)
+        expired = result.error is not None and result.error.startswith("token expired")
+        if (
+            self.hot_switch
+            and account.provider == "claude"
+            and expired
+            and (auth_retry is None or now >= auth_retry)
+        ):
+            refreshed = authctl.refresh(account.name, account.auth_dir, now)
+            if refreshed.ok:
+                self._auth_retry_after.pop(name, None)
+                result = account_limits(account)
+            else:
+                self._auth_retry_after[name] = now + _AUTH_RETRY
 
         if result.source == "api":
             self._good_limits[name] = result
@@ -192,6 +254,11 @@ class FleetMonitor:
         if not force and not self.limits_due(now):
             return self.limits
 
+        if self.hot_switch:
+            from .switcher import sync_active_profile
+
+            sync_active_profile(self.accounts, self.main_config_dir)
+
         self.limits = [self._fetch_limits_one(account, now) for account in self.accounts]
         self.limits_fetched_at = now
         return self.limits
@@ -223,7 +290,7 @@ class FleetMonitor:
         now = now or datetime.now(timezone.utc)
 
         results = [
-            authctl.refresh(account.name, account.config_dir, now)
+            authctl.refresh(account.name, account.auth_dir, now)
             for account in self.accounts
             if account.provider == "claude"
         ]

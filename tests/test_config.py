@@ -20,13 +20,21 @@ def test_load_config_parses_settings_and_accounts(tmp_path: Path) -> None:
     path.write_text(
         "[settings]\n"
         "limits_refresh_seconds = 300\n\n"
+        'main_config_dir = "~/.claude-main"\n'
+        "hot_switch = true\n"
+        "auto_switch_remaining_percent = 1\n\n"
         '[[account]]\nname = "work"\ndir = "~/.claude"\n\n'
+        'switch_dir = "~/.claude-work-saved"\n\n'
         '[[account]]\ndir = "~/.claude-9"\nhidden = true\n'
     )
     config = cfg.load_config(path)
     assert config.limits_refresh_seconds(180.0) == 300.0
+    assert config.main_config_dir() == Path.home() / ".claude-main"
+    assert config.hot_switch() is True
+    assert config.auto_switch_remaining_percent() == 1.0
     assert len(config.accounts) == 2
     assert config.accounts[0].name == "work"
+    assert config.accounts[0].switch_dir == Path.home() / ".claude-work-saved"
     assert config.accounts[1].hidden is True
 
 
@@ -60,7 +68,11 @@ def test_resolve_renames_hides_and_adds(monkeypatch) -> None:
     home = Path.home()
     config = cfg.Config(
         accounts=[
-            cfg.AccountOverride(dir=home / ".claude", name="work"),  # rename
+            cfg.AccountOverride(
+                dir=home / ".claude",
+                name="work",
+                switch_dir=home / ".claude-work-saved",
+            ),
             cfg.AccountOverride(dir=home / ".claude-9", hidden=True),  # hide
             cfg.AccountOverride(dir=Path("/tmp/extra"), name="extra"),  # add
         ]
@@ -68,6 +80,7 @@ def test_resolve_renames_hides_and_adds(monkeypatch) -> None:
     result = collect.resolve_accounts(config)
     names = [a.name for a in result]
     assert names == ["work", "cx-0", "extra"]  # renamed, hidden dropped, addition appended
+    assert result[0].auth_dir == home / ".claude-work-saved"
     assert result[-1].config_dir == Path("/tmp/extra")
 
 
@@ -75,6 +88,42 @@ def test_resolve_no_config_is_pure_detection(monkeypatch) -> None:
     monkeypatch.setattr(collect, "discover_accounts", _detected)
     result = collect.resolve_accounts(cfg.Config())
     assert [a.name for a in result] == ["cc-0", "cc-9", "cx-0"]
+
+
+def test_hot_switch_matches_duplicate_logins_without_account_mapping(
+    tmp_path: Path, monkeypatch
+) -> None:
+    main = tmp_path / ".claude"
+    saved = tmp_path / ".claude-saved"
+    other = tmp_path / ".claude-other"
+    for path, org, email in (
+        (main, "org-a", "a@example.com"),
+        (saved, "org-a", "a@example.com"),
+        (other, "org-b", "b@example.com"),
+    ):
+        path.mkdir()
+        (path / ".claude.json").write_text(
+            '{"oauthAccount":{"organizationUuid":"' + org + '","emailAddress":"' + email + '"}}'
+        )
+        (path / ".credentials.json").write_text('{"claudeAiOauth":{"accessToken":"token"}}')
+    monkeypatch.setattr(
+        collect,
+        "discover_accounts",
+        lambda: [
+            Account("cc-0", main),
+            Account("cc-saved", saved),
+            Account("cc-other", other),
+        ],
+    )
+
+    result = collect.resolve_accounts(
+        cfg.Config(settings={"hot_switch": True, "main_config_dir": str(main)})
+    )
+
+    assert result == [
+        Account("a@example.com", main, credential_dir=saved),
+        Account("b@example.com", other, credential_dir=other),
+    ]
 
 
 # -- relaxed discovery ---------------------------------------------------------
@@ -109,14 +158,31 @@ def test_config_init_writes_and_refuses_overwrite(tmp_path: Path, monkeypatch, c
 def test_save_config_round_trips(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     accounts = [
-        cfg.AccountOverride(dir=Path("/x/.claude"), name="work", provider="claude"),
+        cfg.AccountOverride(
+            dir=Path("/x/.claude"),
+            name="work",
+            provider="claude",
+            switch_dir=Path("/x/.claude-work-saved"),
+        ),
         cfg.AccountOverride(dir=Path("/x/.claude-1"), name="alt", provider="claude", hidden=True),
     ]
-    cfg.save_config({"limits_refresh_seconds": 90, "heatmap_weeks": 10}, accounts, path)
+    cfg.save_config(
+        {
+            "limits_refresh_seconds": 90,
+            "heatmap_weeks": 10,
+            "main_config_dir": "~/.claude",
+            "hot_switch": True,
+        },
+        accounts,
+        path,
+    )
 
     loaded = cfg.load_config(path)
     assert loaded.limits_refresh_seconds(180.0) == 90.0
     assert loaded.heatmap_weeks(26) == 10
+    assert loaded.main_config_dir() == Path.home() / ".claude"
+    assert loaded.hot_switch() is True
+    assert loaded.accounts[0].switch_dir == Path("/x/.claude-work-saved")
     assert {o.name: o.hidden for o in loaded.accounts} == {"work": False, "alt": True}
 
 

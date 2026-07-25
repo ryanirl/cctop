@@ -14,8 +14,9 @@ those up too.
 
 Everything is read from files the tools already write plus a couple of free,
 read-only usage reads; nothing here ever spends message quota. cctop touches
-your credentials only to make those reads, never logs or transmits a token, and
-is read-only except for two explicit, additive account actions. See
+your credentials only for those reads and optional local hot switching, never
+logs or transmits a token, and otherwise changes state only through explicit
+account actions. See
 [SECURITY.md](SECURITY.md) for the full trust statement.
 
 ![cctop](https://raw.githubusercontent.com/ryanirl/cctop/main/docs/hero.png)
@@ -66,14 +67,15 @@ cctop --no-limits     # skip the usage fetch (no network, session table only)
 
 cctop setup           # pick a provider; hand off to its agent to help configure
 cctop accounts        # list discovered accounts (read-only)
+cctop switch [NAME]   # hot-switch main Claude sessions (or choose the best)
 cctop doctor          # read-only self-check (platform, binaries, token/expiry)
 cctop config init     # write a starter ~/.config/cctop/config.toml (optional)
 cctop add-account     # provision a new account (dry-run; see Accounts below)
 ```
 
-TUI keys: `r` refresh now · `R` refresh token · `a` add account · `s` stats ·
-`,` settings · `q` quit. The footer shows a live countdown to the next auto
-refresh; `r` refreshes immediately and resets it.
+TUI keys: `r` refresh now · `R` refresh token · `x` hot-switch account · `a`
+add account · `s` stats · `,` settings · `q` quit. The footer shows a live
+countdown to the next auto refresh; `r` refreshes immediately and resets it.
 
 ### Token refresh (`R`)
 
@@ -82,10 +84,9 @@ lazily when you *use* an account, so an account you are merely monitoring drifts
 past expiry and the usage read starts failing (`token expired`). Press `R` and
 cctop asks the tool that owns the credential to renew it: it runs
 `claude mcp list` under each account's config dir (a quota-free command whose
-startup renews and rewrites the Keychain record). **cctop never writes a
-credential itself** — it only triggers the owner binary and reads the result —
-and it is a no-op on tokens that are still valid. An account whose refresh token
-is itself dead reports "needs re-login" (only a fresh `/login` can fix that).
+startup renews and rewrites the Keychain record). This delegated refresh is a
+no-op on tokens that are still valid. An account whose refresh token is itself
+dead reports "needs re-login" (only a fresh `/login` can fix that).
 
 ### Accounts
 
@@ -102,12 +103,41 @@ existing config, and signs you in. It is **strictly additive** — it never
 deletes, overwrites, or modifies existing config, credentials, or sessions, and
 only writes a shell alias if you explicitly ask for one.
 
+### Hot-switch mode
+
+The original separate-session mode remains the default. To keep one main
+`~/.claude` session history and use the other config directories only as saved
+login profiles, enable:
+
+```toml
+[settings]
+hot_switch = true
+main_config_dir = "~/.claude"
+auto_switch_remaining_percent = 1
+```
+
+Press `x` (or run `cctop switch NAME`) to swap the healthiest saved login into
+the main Keychain/config store. No aliases or account mapping are required:
+cctop identifies logins by their Claude organization identity, collapses
+duplicate login directories automatically, and labels them from their saved
+email address. If the active login exists only in the mutable main store, cctop
+automatically preserves it under `~/.config/cctop/profiles/` before switching.
+Before each swap, cctop copies the main credential back to its active saved
+profile so refresh-token rotation is retained. Claude Code's own advisory locks
+make the update safe around running sessions; they pick up the new login after
+the macOS Keychain cache refreshes.
+
+While the TUI is running, cctop automatically chooses the healthy Claude
+profile with the most headroom when the active profile reaches 1% remaining
+(99% used). This threshold is configurable with
+`auto_switch_remaining_percent`. Disable `hot_switch` at any time to return to
+the original per-directory session view.
+
 ### Configuration (optional)
 
 cctop needs no configuration. If you want to rename, hide, reorder, or add
-accounts (for a layout auto-detection can't guess, like a config dir in a custom
-location or one managed by an account switcher), generate a starter file and
-edit it:
+accounts (for a nonstandard directory that auto-detection cannot find), generate
+a starter file and edit it:
 
 ```bash
 cctop config init     # writes ~/.config/cctop/config.toml, pre-filled with what it detected

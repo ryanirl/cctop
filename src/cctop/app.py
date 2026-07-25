@@ -19,6 +19,7 @@ now. Both polls run in thread workers so neither blocks the UI.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 from rich.console import Group
 from rich.table import Table as RichTable
@@ -212,6 +213,7 @@ class CctopApp(App):
         ("q", "quit", "Quit"),
         ("r", "refresh_limits", "Refresh limits"),
         ("R", "refresh_token", "Refresh token"),
+        ("x", "hot_switch", "Switch account"),
         ("a", "add_account", "Add account"),
         ("s", "stats", "Stats"),
         ("comma", "settings", "Settings"),
@@ -222,11 +224,22 @@ class CctopApp(App):
         accounts: list[Account],
         limits_interval: float = 180.0,
         heatmap_weeks: int = 26,
+        main_config_dir: Path | None = None,
+        auto_switch_remaining_percent: float = 1.0,
+        hot_switch: bool = False,
     ) -> None:
         super().__init__()
-        self.monitor = FleetMonitor(accounts)
+        self.monitor = FleetMonitor(
+            accounts,
+            main_config_dir=main_config_dir,
+            auto_switch_remaining_percent=auto_switch_remaining_percent,
+            hot_switch=hot_switch,
+        )
         self._limits_interval = limits_interval
         self._heatmap_weeks = heatmap_weeks
+        self._main_config_dir = main_config_dir or Path.home() / ".claude"
+        self._auto_switch_remaining_percent = auto_switch_remaining_percent
+        self._hot_switch_enabled = hot_switch
         self._limits_timer: Timer | None = None
         self._states_by_id: dict[str, SessionState] = {}
         self._selected_session_id: str | None = None
@@ -400,7 +413,10 @@ class CctopApp(App):
                 "default",
             ),
             (f"      usage {age} · {nxt}", MUTED),
-            ("      r refresh · R token · a add · s stats · , settings · q quit", MUTED),
+            (
+                "      r refresh · R token · x switch · a add · s stats · , settings · q quit",
+                MUTED,
+            ),
         )
         self.query_one("#footer", Static).update(footer)
 
@@ -410,7 +426,10 @@ class CctopApp(App):
     def _tick_limits(self) -> None:
         now = datetime.now(timezone.utc)
         limits = self.monitor.poll_limits(now)
+        result = self.monitor.maybe_auto_switch()
         self.call_from_thread(self._render_limits, limits, now)
+        if result is not None:
+            self.call_from_thread(self._show_switch_result, result, "auto switch")
 
     def action_stats(self) -> None:
         from .stats_screen import StatsScreen
@@ -423,7 +442,16 @@ class CctopApp(App):
         from .settings_screen import SettingsScreen, build_rows
 
         rows = build_rows(discover_accounts(), config_module.load_config())
-        self.push_screen(SettingsScreen(self._limits_interval, self._heatmap_weeks, rows))
+        self.push_screen(
+            SettingsScreen(
+                self._limits_interval,
+                self._heatmap_weeks,
+                self._main_config_dir,
+                self._auto_switch_remaining_percent,
+                self._hot_switch_enabled,
+                rows,
+            )
+        )
 
     def apply_settings(self) -> None:
         """Reload the config file and apply it live (called by the settings screen).
@@ -435,30 +463,65 @@ class CctopApp(App):
 
         from . import config as config_module
         from .collect import resolve_accounts
+        from .switcher import ensure_stable_accounts
 
         config = config_module.load_config()
         self._limits_interval = config.limits_refresh_seconds(180.0)
         self._heatmap_weeks = config.heatmap_weeks(26)
+        self._main_config_dir = config.main_config_dir()
+        self._auto_switch_remaining_percent = config.auto_switch_remaining_percent()
+        self._hot_switch_enabled = config.hot_switch()
         self.monitor.limits_interval = timedelta(seconds=self._limits_interval)
-        self.monitor.accounts = resolve_accounts(config)
+        accounts = resolve_accounts(config)
+        if self._hot_switch_enabled:
+            accounts = ensure_stable_accounts(accounts, self._main_config_dir)
+        self.monitor.accounts = accounts
+        self.monitor.main_config_dir = self._main_config_dir
+        self.monitor.auto_switch_remaining_percent = self._auto_switch_remaining_percent
+        self.monitor.hot_switch = self._hot_switch_enabled
 
         self._reschedule_limits_timer()
         self.action_refresh_limits()
         self._tick_sessions()
         self._tick_stats()
 
+    def action_hot_switch(self) -> None:
+        """Switch the running main Claude sessions to the healthiest profile."""
+        if not self._hot_switch_enabled:
+            self.notify(
+                "enable hot_switch in settings first",
+                title="account switch",
+                severity="warning",
+            )
+            return
+        self._hot_switch()
+
+    @work(thread=True, exclusive=True, group="switch")
+    def _hot_switch(self) -> None:
+        result = self.monitor.switch_best()
+        if result is None:
+            self.call_from_thread(
+                lambda: self.notify(
+                    "no healthy alternate Claude profile",
+                    title="account switch",
+                    severity="warning",
+                )
+            )
+            return
+        self.call_from_thread(self._show_switch_result, result, "account switch")
+
+    def _show_switch_result(self, result, title: str) -> None:
+        self.notify(
+            result.message,
+            title=title,
+            severity="information" if result.ok else "warning",
+            timeout=7,
+        )
+        if result.ok:
+            self._tick_sessions()
+
     def action_add_account(self) -> None:
-        """Provision an account and sign in, without leaving cctop.
-
-        Suspends the dashboard to hand the terminal to two optional prompts
-        (clone config from an existing account; set a shell alias) and the
-        interactive login, then rediscovers accounts so the new one shows
-        immediately. Everything is explicit and additive: nothing is aliased or
-        cloned unless typed in, the clone is an allowlist (never credentials or
-        state), and the login is scoped to the one new config dir.
-        """
-        from pathlib import Path
-
+        """Provision a separate-config account using the original workflow."""
         from rich.console import Console
 
         from . import manage
@@ -478,7 +541,11 @@ class CctopApp(App):
             ).strip()
             alias = console.input("Shell alias to set? [blank=none]: ").strip()
 
-            plan = manage.plan_add(home, alias or None, reuse_dir=reusable_logged_out_dir(home))
+            plan = manage.plan_add(
+                home,
+                alias or None,
+                reuse_dir=reusable_logged_out_dir(home),
+            )
             source_dir = resolve_config_dir(source_spec) if source_spec else None
             if source_spec and (source_dir is None or source_dir == plan.config_dir):
                 console.print(f"[red]skipping clone: '{source_spec}' not usable[/red]")
@@ -539,7 +606,10 @@ class CctopApp(App):
     def _force_limits(self) -> None:
         now = datetime.now(timezone.utc)
         limits = self.monitor.force_refresh_limits(now)
+        result = self.monitor.maybe_auto_switch()
         self.call_from_thread(self._render_limits, limits, now)
+        if result is not None:
+            self.call_from_thread(self._show_switch_result, result, "auto switch")
         # Reset the periodic timer so the next auto-refresh is a full interval
         # away, keeping the footer countdown honest after a manual refresh.
         self.call_from_thread(self._reschedule_limits_timer)

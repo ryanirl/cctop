@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cctop.monitor as monitor_mod
+from cctop.authctl import RefreshResult
 from cctop.collect import Account
 from cctop.models import AccountLimits, LimitWindow
 from cctop.monitor import _BACKOFF_BASE, FleetMonitor
@@ -119,3 +120,22 @@ def test_token_expired_drops_stale_good(monkeypatch) -> None:
     assert result[0].source == "none"
     assert result[0].error == "token expired"
     assert "cc-0" not in monitor._good_limits
+
+
+def test_hot_switch_mode_auto_refreshes_saved_login(monkeypatch) -> None:
+    monitor, calls = _monitor(monkeypatch, [_expired(), _good(8.0)])
+    monitor.hot_switch = True
+    refreshes = []
+
+    def refresh(account: str, config_dir: Path, now: datetime) -> RefreshResult:
+        refreshes.append((account, config_dir, now))
+        return RefreshResult(account, True, "refreshed", now + timedelta(hours=12))
+
+    monkeypatch.setattr(monitor_mod.authctl, "refresh", refresh)
+    monkeypatch.setattr("cctop.switcher.sync_active_profile", lambda accounts, main: None)
+
+    result = monitor.poll_limits(T0, force=True)
+
+    assert result[0].source == "api"
+    assert calls[0] == 2
+    assert len(refreshes) == 1

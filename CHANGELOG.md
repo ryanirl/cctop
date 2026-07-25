@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-25
+
+### Added
+- Optional hot-switch mode: saved Claude config directories become credential
+  profiles for one main session directory, with lock-safe Keychain/config swaps,
+  current-token sync-back, `cctop switch [NAME]`, and the TUI `x` key.
+- Automatic rotation to the healthy Claude profile with the most headroom at
+  1% remaining (configurable), including delegated refresh of expired saved
+  access tokens without a login/logout cycle.
+
+### Preserved
+- Original per-config-directory session monitoring and account provisioning
+  remain the default behavior when `hot_switch` is disabled.
+
 ## [0.2.0] - 2026-07-19
 
 ### Added
@@ -52,5 +66,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `LICENSE` (MIT), `SECURITY.md`, and packaging metadata (distribution
   `cctop-tui`; the command stays `cctop`).
 
+[0.3.0]: https://github.com/ryanirl/cctop/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ryanirl/cctop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ryanirl/cctop/releases/tag/v0.1.0

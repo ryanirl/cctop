@@ -32,8 +32,13 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 def _oauth_account(config_dir: Path) -> dict:
     """The oauthAccount block from an account's .claude.json (identifiers only)."""
+    path = (
+        Path.home() / ".claude.json"
+        if config_dir == Path.home() / ".claude"
+        else config_dir / ".claude.json"
+    )
     try:
-        record = json.loads((config_dir / ".claude.json").read_text())
+        record = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
     account = record.get("oauthAccount")
@@ -99,10 +104,13 @@ def get_token(config_dir: Path) -> str | None:
     token = _token_from_credentials_file(config_dir)
     if token:
         return token
-    token = _keychain_lookup(_keychain_service(config_dir))
+    service = (
+        KEYCHAIN_SERVICE if config_dir == Path.home() / ".claude" else _keychain_service(config_dir)
+    )
+    token = _keychain_lookup(service)
     if token:
         return token
-    return _keychain_lookup(KEYCHAIN_SERVICE)
+    return None
 
 
 def _get(url: str, token: str) -> tuple[int | None, dict[str, str], str]:
