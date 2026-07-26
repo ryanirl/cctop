@@ -14,9 +14,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   independently of the TUI and terminal job control.
 - Automatic rotation to the healthy Claude profile with the most headroom at
   1% remaining (configurable), including delegated refresh of expired saved
-  access tokens without a login/logout cycle. A profile past the same threshold
-  is not treated as an escape, so a fleet with no headroom left says so instead
-  of rotating between exhausted logins.
+  access tokens without a login/logout cycle. Candidates must have strictly
+  more headroom than the active profile, preventing ping-pong while still using
+  every account that can make progress.
 
 ### Changed
 - `get_token` no longer falls back to the default account's Keychain service, so
@@ -27,6 +27,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   profile recovery, even while usage reads are rate-limited. The dead main
   credential is never synced over its saved profile, and stale usage data can
   no longer select a locally expired target.
+- Automatic rotation now accepts an above-threshold profile when it has
+  strictly more headroom than the active one, so a fully exhausted login can
+  hand work to a still-usable account without introducing switch ping-pong.
 
 ### Preserved
 - Original per-config-directory session monitoring and account provisioning

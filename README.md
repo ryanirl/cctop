@@ -130,10 +130,11 @@ While the TUI is running, cctop automatically chooses the healthy Claude
 profile with the most headroom when the active profile reaches 1% remaining
 (99% used). This threshold is configurable with
 `auto_switch_remaining_percent`; a profile that is itself past the threshold is
-never chosen, so cctop reports that no healthy profile is left rather than
-rotating between two exhausted logins. Disable `hot_switch` at any time to
-return to the original per-directory session view — the saved profiles cctop
-manages for itself stay out of the account list while it is off.
+chosen only when it still has strictly more headroom than the active profile.
+That lets a 93%-used login take over from one at 100% without allowing two
+equally exhausted logins to ping-pong. Disable `hot_switch` at any time to return
+to the original per-directory session view — the saved profiles cctop manages
+for itself stay out of the account list while it is off.
 
 For rotation that does not depend on keeping the TUI in the foreground, run
 `cctop autoswitch`. It polls immediately and then at `limits_refresh_seconds`,

@@ -321,10 +321,10 @@ def auto_switch(
 ) -> SwitchResult | None:
     """Rotate when the active profile has at most ``remaining_percent`` left.
 
-    A candidate must be under the same threshold that triggered the rotation,
-    not merely under a fixed ceiling: swapping in a profile that is itself past
-    the trigger would re-fire on the next poll and ping-pong between two equally
-    exhausted logins.
+    A candidate must have strictly more headroom than the current profile.
+    Requiring it to clear the original trigger would strand a fully exhausted
+    account when, for example, a 93%-used profile can still finish the work.
+    Strict improvement prevents ping-pong while using every available account.
     """
     current = active_account(accounts, main_config_dir)
     if current is None:
@@ -334,7 +334,7 @@ def auto_switch(
     used = _binding_percent(current_limits) if current_limits is not None else None
     if used is None or used < trigger:
         return None
-    target = best_account(accounts, limits, main_config_dir, min(HEALTHY_PERCENT, trigger))
+    target = best_account(accounts, limits, main_config_dir, min(HEALTHY_PERCENT, used))
     if target is None:
         return SwitchResult(
             False,

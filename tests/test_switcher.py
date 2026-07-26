@@ -188,8 +188,8 @@ def test_auto_switch_fires_at_one_percent_remaining(tmp_path: Path) -> None:
     assert result.active == "b"
 
 
-def test_auto_switch_refuses_a_target_past_the_same_threshold(tmp_path: Path) -> None:
-    """A candidate that would re-trigger the rotation is not an escape."""
+def test_auto_switch_refuses_a_target_with_less_headroom(tmp_path: Path) -> None:
+    """A worse candidate would re-trigger rotation and is not an escape."""
     main = tmp_path / "main"
     a, b = tmp_path / "a", tmp_path / "b"
     _profile(main, "org-a", "rotated-a")
@@ -202,6 +202,26 @@ def test_auto_switch_refuses_a_target_past_the_same_threshold(tmp_path: Path) ->
     assert result is not None and result.ok is False
     assert "no healthy profile" in result.message
     assert active_account(accounts, main) == accounts[0]
+
+
+def test_exhausted_account_switches_to_imperfect_but_better_profile(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    exhausted = tmp_path / "exhausted"
+    better = tmp_path / "better"
+    _profile(main, "org-a", "main-a")
+    _profile(exhausted, "org-a", "saved-a")
+    _profile(better, "org-b", "token-b")
+    accounts = [Account("exhausted", exhausted), Account("better", better)]
+
+    result = auto_switch(
+        accounts,
+        [_limits("exhausted", 100), _limits("better", 93)],
+        main,
+        10.0,
+    )
+
+    assert result is not None and result.ok is True
+    assert result.active == "better"
 
 
 def test_switch_leaves_credential_and_identity_agreeing_when_it_fails(tmp_path: Path) -> None:
