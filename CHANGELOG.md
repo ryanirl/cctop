@@ -30,6 +30,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Automatic rotation now accepts an above-threshold profile when it has
   strictly more headroom than the active one, so a fully exhausted login can
   hand work to a still-usable account without introducing switch ping-pong.
+- The TUI and autoswitch supervisor now share last-good usage metadata. During
+  HTTP 429 backoff, new cctop processes keep showing cached percentages, reset
+  times, and reading age instead of replacing useful data with an error.
 
 ### Preserved
 - Original per-config-directory session monitoring and account provisioning

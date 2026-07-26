@@ -44,6 +44,7 @@ class AutoswitchService:
             main_config_dir=main_config_dir,
             auto_switch_remaining_percent=config.auto_switch_remaining_percent(),
             hot_switch=True,
+            limits_cache_path=config_module.config_dir() / "limits-cache.json",
         )
         return cls(monitor, config.limits_refresh_seconds(180.0))
 
@@ -84,7 +85,8 @@ def _cycle_summary(cycle: AutoswitchCycle) -> str:
     for item in cycle.limits:
         percent = _binding_percent(item)
         if percent is not None:
-            readings.append(f"{item.account}={percent:g}%")
+            suffix = f" (cached: {item.error})" if item.error else ""
+            readings.append(f"{item.account}={percent:g}%{suffix}")
         else:
             readings.append(f"{item.account}=unavailable ({item.error or 'no usage data'})")
     status = (

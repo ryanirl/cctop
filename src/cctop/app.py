@@ -31,6 +31,7 @@ from textual.containers import Container
 from textual.timer import Timer
 from textual.widgets import DataTable, Rule, Static
 
+from . import config as config_module
 from .cli import (
     _format_age,
     _format_context,
@@ -113,6 +114,10 @@ def _account_block(
     if account.source != "api":
         lines.append(Text(account.error or "no limit data", style=MUTED))
     else:
+        if account.error:
+            age = _format_age(account.fetched_at, now)
+            header.append(f"   cached {age} ago · ", style=MUTED)
+            header.append(account.error, style=MUTED)
         lines.extend(_gauge_line(window, now, bar_width, label_width) for window in account.windows)
     return Group(*lines)
 
@@ -238,6 +243,7 @@ class CctopApp(App):
             main_config_dir=main_config_dir,
             auto_switch_remaining_percent=auto_switch_remaining_percent,
             hot_switch=hot_switch,
+            limits_cache_path=config_module.config_dir() / "limits-cache.json",
         )
         self._limits_interval = limits_interval
         self._heatmap_weeks = heatmap_weeks

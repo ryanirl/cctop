@@ -9,6 +9,7 @@ fetch so the free-but-networked limits call runs on its own slower cadence.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,6 +17,8 @@ from typing import TYPE_CHECKING
 from . import authctl
 from .authctl import RefreshResult
 from .collect import Account, _effective_status, account_limits, codex_session_states
+from .limits_cache import load as load_limits_cache
+from .limits_cache import save as save_limits_cache
 from .models import AccountLimits, FleetSnapshot, SessionState, UsageTotals
 from .registry import process_alive, read_registry
 from .transcript import TranscriptTailer, find_transcript
@@ -50,25 +53,31 @@ class FleetMonitor:
         main_config_dir: Path | None = None,
         auto_switch_remaining_percent: float = 1.0,
         hot_switch: bool = False,
+        limits_cache_path: Path | None = None,
     ) -> None:
         self.accounts = accounts
         self.limits_interval = limits_interval
         self.main_config_dir = main_config_dir or Path.home() / ".claude"
         self.auto_switch_remaining_percent = auto_switch_remaining_percent
         self.hot_switch = hot_switch
+        self._limits_cache_path = limits_cache_path
 
         self._tailers: dict[str, TranscriptTailer] = {}
-        self.limits: list[AccountLimits] = []
-        self.limits_fetched_at: datetime | None = None
+        cached = load_limits_cache(limits_cache_path) if limits_cache_path is not None else {}
+        account_names = {account.name for account in accounts}
+        self._good_limits = {name: item for name, item in cached.items() if name in account_names}
+        self.limits = list(self._good_limits.values())
+        fetched = [item.fetched_at for item in self.limits if item.fetched_at is not None]
+        self.limits_fetched_at = max(fetched) if fetched else None
         self._codex_cache: dict[str, list[SessionState]] = {}
         self._codex_polled_at: datetime | None = None
 
         # Per-account rate-limit state: the last successful fetch (so a transient
         # failure can keep showing real numbers), when the account may be fetched
         # again, and the current backoff length.
-        self._good_limits: dict[str, AccountLimits] = {}
         self._cooldown_until: dict[str, datetime] = {}
         self._backoff: dict[str, timedelta] = {}
+        self._transient_error: dict[str, str] = {}
         self._auth_retry_after: dict[str, datetime] = {}
         self._main_auth_retry_after: datetime | None = None
         self._main_auth_error: str | None = None
@@ -217,7 +226,11 @@ class FleetMonitor:
         good = self._good_limits.get(name)
         if cooldown is not None and now < cooldown:
             if good is not None:
-                return good
+                return replace(
+                    good,
+                    error=self._transient_error.get(name, "rate limited, retrying"),
+                    retriable=True,
+                )
             return AccountLimits(
                 name, None, [], "none", None, error="rate limited, retrying", retriable=True
             )
@@ -247,6 +260,7 @@ class FleetMonitor:
             self._good_limits[name] = result
             self._backoff.pop(name, None)
             self._cooldown_until.pop(name, None)
+            self._transient_error.pop(name, None)
             return result
 
         if result.retriable:
@@ -257,11 +271,17 @@ class FleetMonitor:
                 delay = _BACKOFF_BASE if previous is None else min(previous * 2, _BACKOFF_CAP)
             self._backoff[name] = delay
             self._cooldown_until[name] = now + delay
-            return good if good is not None else result
+            self._transient_error[name] = result.error or "usage temporarily unavailable"
+            return (
+                replace(good, error=self._transient_error[name], retriable=True)
+                if good is not None
+                else result
+            )
 
         # Non-retriable (token expired, wrong credential): a real, actionable
         # state. Drop any stale-good so the UI shows what the user must fix.
         self._good_limits.pop(name, None)
+        self._transient_error.pop(name, None)
         return result
 
     def _prepare_main_auth(self, now: datetime) -> None:
@@ -321,6 +341,8 @@ class FleetMonitor:
 
         self.limits = [self._fetch_limits_one(account, now) for account in self.accounts]
         self.limits_fetched_at = now
+        if self._limits_cache_path is not None:
+            save_limits_cache(self._limits_cache_path, self._good_limits)
         return self.limits
 
     def force_refresh_limits(self, now: datetime | None = None) -> list[AccountLimits]:

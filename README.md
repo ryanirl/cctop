@@ -141,7 +141,9 @@ For rotation that does not depend on keeping the TUI in the foreground, run
 refreshes dormant saved logins, and applies the same rotation policy as the TUI.
 It is suitable for a user service such as macOS launchd. Use
 `cctop autoswitch --once` to verify the configured fleet without starting the
-long-running supervisor.
+long-running supervisor. Successful usage readings are shared through a local
+metadata-only cache, so another cctop process still shows the last percentages,
+reset times, and reading age when Anthropic temporarily returns HTTP 429.
 
 Keeping the saved profile in sync is what avoids re-logins: an access token
 lasts ~12-15h, but the refresh token behind it is what actually keeps an

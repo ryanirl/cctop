@@ -148,7 +148,8 @@ def _render_limits(limits: list[AccountLimits], now: datetime, console: Console)
 
         gauges = "   ".join(_render_gauge(w, now) for w in account.windows)
         age = _format_age(account.fetched_at, now)
-        console.print(f"{header}   {gauges}   [grey50]{age} ago[/grey50]")
+        cached = f" · cached: {account.error}" if account.error else ""
+        console.print(f"{header}   {gauges}   [grey50]{age} ago{cached}[/grey50]")
 
 
 def _render_table(snapshot: FleetSnapshot, multi_account: bool) -> Table:

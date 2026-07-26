@@ -26,7 +26,7 @@ def _profile(
     token: str,
     expires_at: datetime | None = None,
 ) -> None:
-    expires_at = expires_at or datetime.now(timezone.utc) + timedelta(hours=12)
+    expires_at = expires_at or datetime(2030, 1, 1, tzinfo=timezone.utc)
     path.mkdir()
     (path / ".claude.json").write_text(
         json.dumps({"oauthAccount": {"organizationUuid": org, "emailAddress": f"{org}@x"}})
