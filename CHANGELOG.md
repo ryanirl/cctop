@@ -33,6 +33,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The TUI and autoswitch supervisor now share last-good usage metadata. During
   HTTP 429 backoff, new cctop processes keep showing cached percentages, reset
   times, and reading age instead of replacing useful data with an error.
+- Saved-profile expiry is checked before the usage request, so a logged-out
+  account is refreshed or reported as `needs re-login` instead of being
+  misclassified when the usage endpoint returns a fleet-wide 429 first.
 
 ### Preserved
 - Original per-config-directory session monitoring and account provisioning

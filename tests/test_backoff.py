@@ -136,9 +136,7 @@ def test_hot_switch_mode_auto_refreshes_saved_login(monkeypatch) -> None:
     monkeypatch.setattr(
         monitor_mod.authctl,
         "read_expiry",
-        lambda config_dir: (
-            T0 + timedelta(hours=1) if config_dir == monitor.main_config_dir else None
-        ),
+        lambda config_dir: T0 + timedelta(hours=1),
     )
     monkeypatch.setattr("cctop.switcher.sync_active_profile", lambda accounts, main: None)
 
@@ -181,3 +179,29 @@ def test_dead_main_credential_is_not_synced_and_requests_failover(monkeypatch) -
     assert syncs == []
     assert result == SwitchResult(False, "cc-0", "cc-0", "needs re-login")
     assert recovery[0][3:] == ("needs re-login", T0)
+
+
+def test_hot_switch_reports_dead_local_login_without_usage_request(monkeypatch) -> None:
+    monitor, calls = _monitor(monkeypatch, [_rate_limited()])
+    monitor.hot_switch = True
+    monkeypatch.setattr(
+        monitor_mod.authctl,
+        "read_expiry",
+        lambda config_dir: (
+            T0 + timedelta(hours=1)
+            if config_dir == monitor.main_config_dir
+            else T0 - timedelta(minutes=1)
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_mod.authctl,
+        "refresh",
+        lambda name, config_dir, now: RefreshResult(name, False, "needs re-login", None),
+    )
+    monkeypatch.setattr("cctop.switcher.sync_active_profile", lambda accounts, main: None)
+
+    result = monitor.poll_limits(T0, force=True)
+
+    assert calls[0] == 0
+    assert result[0].error == "needs re-login"
+    assert result[0].retriable is False

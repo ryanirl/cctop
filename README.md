@@ -144,6 +144,8 @@ It is suitable for a user service such as macOS launchd. Use
 long-running supervisor. Successful usage readings are shared through a local
 metadata-only cache, so another cctop process still shows the last percentages,
 reset times, and reading age when Anthropic temporarily returns HTTP 429.
+Locally expired profiles are refreshed before the usage request; a dead refresh
+token is shown as `needs re-login` rather than being masked by a fleet-wide 429.
 
 Keeping the saved profile in sync is what avoids re-logins: an access token
 lasts ~12-15h, but the refresh token behind it is what actually keeps an

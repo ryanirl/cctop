@@ -79,6 +79,7 @@ class FleetMonitor:
         self._backoff: dict[str, timedelta] = {}
         self._transient_error: dict[str, str] = {}
         self._auth_retry_after: dict[str, datetime] = {}
+        self._auth_error: dict[str, str] = {}
         self._main_auth_retry_after: datetime | None = None
         self._main_auth_error: str | None = None
         self._main_auth_checked_at: datetime | None = None
@@ -252,8 +253,43 @@ class FleetMonitor:
         a real error (token expired) is surfaced as-is.
         """
         name = account.name
-        cooldown = self._cooldown_until.get(name)
         good = self._good_limits.get(name)
+
+        # A locally expired saved credential is actionable before any network
+        # request. Anthropic may return a fleet-wide 429 before authentication,
+        # which would otherwise disguise a logged-out profile as merely rate
+        # limited and waste another request every time its cooldown expires.
+        if self.hot_switch and account.provider == "claude":
+            expires_at = authctl.read_expiry(account.auth_dir)
+            if expires_at is None or expires_at <= now:
+                auth_retry = self._auth_retry_after.get(name)
+                if auth_retry is None or now >= auth_retry:
+                    refreshed = authctl.refresh(name, account.auth_dir, now)
+                    if refreshed.ok:
+                        self._auth_retry_after.pop(name, None)
+                        self._auth_error.pop(name, None)
+                        self._cooldown_until.pop(name, None)
+                        self._backoff.pop(name, None)
+                    else:
+                        self._auth_retry_after[name] = now + _AUTH_RETRY
+                        self._auth_error[name] = refreshed.message
+                error = self._auth_error.get(name)
+                if error is not None:
+                    self._good_limits.pop(name, None)
+                    self._transient_error.pop(name, None)
+                    return AccountLimits(
+                        name,
+                        good.tier if good is not None else None,
+                        [],
+                        "none",
+                        None,
+                        error=error,
+                    )
+            else:
+                self._auth_retry_after.pop(name, None)
+                self._auth_error.pop(name, None)
+
+        cooldown = self._cooldown_until.get(name)
         if cooldown is not None and now < cooldown:
             if good is not None:
                 return replace(
@@ -282,9 +318,12 @@ class FleetMonitor:
             refreshed = authctl.refresh(account.name, account.auth_dir, now)
             if refreshed.ok:
                 self._auth_retry_after.pop(name, None)
+                self._auth_error.pop(name, None)
                 result = account_limits(account)
             else:
                 self._auth_retry_after[name] = now + _AUTH_RETRY
+                self._auth_error[name] = refreshed.message
+                result = replace(result, error=refreshed.message)
 
         if result.source == "api":
             self._good_limits[name] = result
