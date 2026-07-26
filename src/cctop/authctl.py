@@ -33,6 +33,7 @@ _REFRESH_ARGS = ("mcp", "list")
 _STATUS_ARGS = ("auth", "status", "--json")
 _COMMAND_TIMEOUT = 30
 
+_USER_BINARY = Path.home() / ".local" / "bin" / "claude"
 _BINARY_FALLBACK = Path("/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
 _KEYCHAIN_SERVICE = "Claude Code-credentials"
 _KEYCHAIN_ACCOUNT = "user"
@@ -46,12 +47,16 @@ class CredentialError(RuntimeError):
 def find_claude_binary() -> str | None:
     """The real Claude Code executable, or None if it cannot be located.
 
-    Prefers PATH (a `claude` symlink into the npm install); falls back to the
-    known native-build location so the refresh works even when PATH is bare.
+    Prefers PATH (a `claude` symlink into the native install), then the standard
+    user-local link, then the legacy global npm location.  The explicit
+    user-local path matters for launchd, whose deliberately small PATH omits
+    ``~/.local/bin``.
     """
     found = shutil.which("claude")
     if found:
         return found
+    if _USER_BINARY.exists():
+        return str(_USER_BINARY)
     return str(_BINARY_FALLBACK) if _BINARY_FALLBACK.exists() else None
 
 

@@ -135,6 +135,13 @@ rotating between two exhausted logins. Disable `hot_switch` at any time to
 return to the original per-directory session view — the saved profiles cctop
 manages for itself stay out of the account list while it is off.
 
+For rotation that does not depend on keeping the TUI in the foreground, run
+`cctop autoswitch`. It polls immediately and then at `limits_refresh_seconds`,
+refreshes dormant saved logins, and applies the same rotation policy as the TUI.
+It is suitable for a user service such as macOS launchd. Use
+`cctop autoswitch --once` to verify the configured fleet without starting the
+long-running supervisor.
+
 Keeping the saved profile in sync is what avoids re-logins: an access token
 lasts ~12-15h, but the refresh token behind it is what actually keeps an
 account alive, and it rotates as Claude Code uses it. cctop copies the current

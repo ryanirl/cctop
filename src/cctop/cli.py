@@ -630,6 +630,33 @@ def _cmd_switch(argv: list[str]) -> None:
     console.print(f"[{style}]{result.message}[/{style}]")
 
 
+def _cmd_autoswitch(argv: list[str]) -> None:
+    """Run hot switching without coupling it to an interactive TUI."""
+    from .autoswitch import AutoswitchService
+
+    parser = argparse.ArgumentParser(
+        prog="cctop autoswitch",
+        description="Continuously refresh usage and hot-switch Claude profiles.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Poll and apply the switch policy once, then exit.",
+    )
+    args = parser.parse_args(argv)
+    console = Console()
+    try:
+        service = AutoswitchService.from_config()
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        return
+
+    try:
+        service.run(once=args.once, emit=console.print)
+    except KeyboardInterrupt:
+        console.print("[grey50]autoswitch stopped[/grey50]")
+
+
 def _cmd_config(argv: list[str]) -> None:
     """`cctop config init [--force]` writes a starter config; `config path` prints it.
 
@@ -811,6 +838,9 @@ def main() -> None:
         return
     if argv[:1] == ["switch"]:
         _cmd_switch(argv[1:])
+        return
+    if argv[:1] == ["autoswitch"]:
+        _cmd_autoswitch(argv[1:])
         return
     if argv[:1] == ["doctor"]:
         _cmd_doctor()

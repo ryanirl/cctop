@@ -10,6 +10,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Optional hot-switch mode: saved Claude config directories become credential
   profiles for one main session directory, with lock-safe Keychain/config swaps,
   current-token sync-back, `cctop switch [NAME]`, and the TUI `x` key.
+- A headless `cctop autoswitch` supervisor keeps automatic rotation running
+  independently of the TUI and terminal job control.
 - Automatic rotation to the healthy Claude profile with the most headroom at
   1% remaining (configurable), including delegated refresh of expired saved
   access tokens without a login/logout cycle. A profile past the same threshold
