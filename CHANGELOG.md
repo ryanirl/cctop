@@ -23,6 +23,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a logged-out config dir reads as having no token instead of borrowing the
   default account's. The default-profile Keychain and identity-path rules now
   live in one place (`authctl`) instead of being restated per call site.
+- A rejected live credential now triggers delegated refresh and then immediate
+  profile recovery, even while usage reads are rate-limited. The dead main
+  credential is never synced over its saved profile, and stale usage data can
+  no longer select a locally expired target.
 
 ### Preserved
 - Original per-config-directory session monitoring and account provisioning

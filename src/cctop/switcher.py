@@ -7,6 +7,7 @@ import os
 import re
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import authctl
@@ -153,6 +154,8 @@ def switch_account(
     accounts: list[Account],
     target: Account,
     main_config_dir: Path,
+    *,
+    sync_previous: bool = True,
 ) -> SwitchResult:
     """Atomically activate ``target`` while preserving the current login.
 
@@ -163,9 +166,9 @@ def switch_account(
     if target.provider != "claude":
         return SwitchResult(False, None, None, "Codex profiles are not switchable")
     previous = active_account(accounts, main_config_dir)
-    if previous is not None and previous.auth_dir == target.auth_dir:
+    if previous is not None and previous.auth_dir == target.auth_dir and sync_previous:
         return SwitchResult(True, previous.name, target.name, f"{target.name} already active")
-    if previous is not None and previous.auth_dir == main_config_dir:
+    if previous is not None and previous.auth_dir == main_config_dir and sync_previous:
         return SwitchResult(
             False,
             previous.name,
@@ -183,7 +186,7 @@ def switch_account(
             target_credential = authctl.read_credentials(target.auth_dir)
             staged_identity = _stage_main_identity(main_config_dir, target.auth_dir)
             try:
-                if previous is not None:
+                if previous is not None and sync_previous:
                     _write_credential(previous.auth_dir, authctl.read_credentials(main_config_dir))
                 _write_credential(main_config_dir, target_credential)
                 os.replace(staged_identity, authctl.identity_path(main_config_dir))
@@ -229,16 +232,21 @@ def best_account(
     limits: list[AccountLimits],
     main_config_dir: Path,
     max_percent: float = HEALTHY_PERCENT,
+    now: datetime | None = None,
 ) -> Account | None:
     """The non-active Claude profile with the most limit headroom.
 
     ``max_percent`` is the usage a candidate must be under to count as healthy.
     """
+    now = now or datetime.now(timezone.utc)
     current = active_account(accounts, main_config_dir)
     by_name = {item.account: item for item in limits}
     candidates: list[tuple[float, Account]] = []
     for account in accounts:
         if account.provider != "claude" or account == current:
+            continue
+        expires_at = authctl.read_expiry(account.auth_dir)
+        if expires_at is None or expires_at <= now:
             continue
         limits_for_account = by_name.get(
             account.name,
@@ -248,6 +256,61 @@ def best_account(
         if percent is not None and percent < max_percent:
             candidates.append((percent, account))
     return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def auth_recovery_account(
+    accounts: list[Account],
+    limits: list[AccountLimits],
+    main_config_dir: Path,
+    now: datetime | None = None,
+) -> Account | None:
+    """Choose a saved profile that can restore a rejected live credential.
+
+    A successful usage reading is strongest evidence and remains ranked by
+    headroom. When the usage endpoint itself is unavailable (for example 429),
+    a locally unexpired credential is still sufficient to restore Claude Code.
+    Known-expired and known-exhausted profiles are never selected.
+    """
+    now = now or datetime.now(timezone.utc)
+    by_name = {item.account: item for item in limits}
+    candidates: list[tuple[int, float, Account]] = []
+    for account in accounts:
+        if account.provider != "claude" or account.auth_dir == main_config_dir:
+            continue
+        expires_at = authctl.read_expiry(account.auth_dir)
+        if expires_at is None or expires_at <= now:
+            continue
+        reading = by_name.get(account.name)
+        percent = _binding_percent(reading) if reading is not None else None
+        if percent is not None:
+            if percent >= HEALTHY_PERCENT:
+                continue
+            candidates.append((0, percent, account))
+            continue
+        if reading is not None and not reading.retriable:
+            continue
+        candidates.append((1, -expires_at.timestamp(), account))
+    return min(candidates, key=lambda item: (item[0], item[1]))[2] if candidates else None
+
+
+def recover_auth(
+    accounts: list[Account],
+    limits: list[AccountLimits],
+    main_config_dir: Path,
+    error: str,
+    now: datetime | None = None,
+) -> SwitchResult:
+    """Restore a live login without preserving the credential proven dead."""
+    current = active_account(accounts, main_config_dir)
+    target = auth_recovery_account(accounts, limits, main_config_dir, now)
+    if target is None:
+        return SwitchResult(
+            False,
+            current.name if current else None,
+            current.name if current else None,
+            f"active login unavailable ({error}); no ready profile",
+        )
+    return switch_account(accounts, target, main_config_dir, sync_previous=False)
 
 
 def auto_switch(

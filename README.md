@@ -145,10 +145,14 @@ long-running supervisor.
 Keeping the saved profile in sync is what avoids re-logins: an access token
 lasts ~12-15h, but the refresh token behind it is what actually keeps an
 account alive, and it rotates as Claude Code uses it. cctop copies the current
-main credential back to its saved profile before every swap and on every limits
-poll, so a profile is never reactivated with a superseded refresh token. Only a
-refresh token that is genuinely dead needs `/login` again, and nothing local can
-substitute for that OAuth round trip.
+main credential back to its saved profile before normal swaps and limits polls
+while that credential is valid, so a profile is never reactivated with a
+superseded refresh token. Only a refresh token that is genuinely dead needs
+`/login` again, and nothing local can substitute for that OAuth round trip. If
+the live main credential is rejected,
+cctop first asks Claude Code to refresh it; when that refresh token is dead,
+cctop preserves the saved copy and immediately activates a ready profile. This
+recovery does not depend on the usage endpoint being available.
 
 ### Configuration (optional)
 

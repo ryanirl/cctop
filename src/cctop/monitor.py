@@ -70,6 +70,9 @@ class FleetMonitor:
         self._cooldown_until: dict[str, datetime] = {}
         self._backoff: dict[str, timedelta] = {}
         self._auth_retry_after: dict[str, datetime] = {}
+        self._main_auth_retry_after: datetime | None = None
+        self._main_auth_error: str | None = None
+        self._main_auth_checked_at: datetime | None = None
 
     def _tailer_for(self, config_dir, session_id: str) -> TranscriptTailer | None:
         """The live tailer for a session, created (and its file located) once."""
@@ -162,7 +165,20 @@ class FleetMonitor:
         """Apply the configured remaining-headroom rotation policy to cached limits."""
         if not self.hot_switch:
             return None
-        from .switcher import auto_switch
+        from .switcher import auto_switch, recover_auth
+
+        if self._main_auth_error is not None:
+            result = recover_auth(
+                self.accounts,
+                self.limits,
+                self.main_config_dir,
+                self._main_auth_error,
+                self._main_auth_checked_at,
+            )
+            if result.ok:
+                self._main_auth_error = None
+                self._main_auth_retry_after = None
+            return result
 
         return auto_switch(
             self.accounts,
@@ -248,6 +264,42 @@ class FleetMonitor:
         self._good_limits.pop(name, None)
         return result
 
+    def _prepare_main_auth(self, now: datetime) -> None:
+        """Refresh the live credential or mark it for immediate failover.
+
+        Saved-profile usage probes do not prove that the mutable main store is
+        usable. Check that store directly before syncing it back: if Claude
+        cannot refresh it, preserving it would overwrite the saved profile with
+        the credential that just produced ``Login expired``.
+        """
+        from .switcher import active_account, sync_active_profile
+
+        self._main_auth_checked_at = now
+        expires_at = authctl.read_expiry(self.main_config_dir)
+        if expires_at is not None and expires_at > now:
+            self._main_auth_error = None
+            self._main_auth_retry_after = None
+            sync_active_profile(self.accounts, self.main_config_dir)
+            return
+
+        if self._main_auth_retry_after is not None and now < self._main_auth_retry_after:
+            return
+
+        current = active_account(self.accounts, self.main_config_dir)
+        refreshed = authctl.refresh(
+            current.name if current is not None else "main",
+            self.main_config_dir,
+            now,
+        )
+        if refreshed.ok:
+            self._main_auth_error = None
+            self._main_auth_retry_after = None
+            sync_active_profile(self.accounts, self.main_config_dir)
+            return
+
+        self._main_auth_error = refreshed.message
+        self._main_auth_retry_after = now + _AUTH_RETRY
+
     def poll_limits(
         self,
         now: datetime | None = None,
@@ -265,9 +317,7 @@ class FleetMonitor:
             return self.limits
 
         if self.hot_switch:
-            from .switcher import sync_active_profile
-
-            sync_active_profile(self.accounts, self.main_config_dir)
+            self._prepare_main_auth(now)
 
         self.limits = [self._fetch_limits_one(account, now) for account in self.accounts]
         self.limits_fetched_at = now

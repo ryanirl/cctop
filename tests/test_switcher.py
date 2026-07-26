@@ -3,22 +3,30 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cctop.collect import Account
 from cctop.models import AccountLimits, LimitWindow
 from cctop.switcher import (
     active_account,
+    auth_recovery_account,
     auto_switch,
     best_account,
     ensure_stable_accounts,
+    recover_auth,
     switch_account,
     sync_active_profile,
 )
 
 
-def _profile(path: Path, org: str, token: str) -> None:
+def _profile(
+    path: Path,
+    org: str,
+    token: str,
+    expires_at: datetime | None = None,
+) -> None:
+    expires_at = expires_at or datetime.now(timezone.utc) + timedelta(hours=12)
     path.mkdir()
     (path / ".claude.json").write_text(
         json.dumps({"oauthAccount": {"organizationUuid": org, "emailAddress": f"{org}@x"}})
@@ -29,6 +37,7 @@ def _profile(path: Path, org: str, token: str) -> None:
                 "claudeAiOauth": {
                     "accessToken": token,
                     "refreshToken": f"refresh-{token}",
+                    "expiresAt": int(expires_at.timestamp() * 1000),
                 }
             }
         )
@@ -138,6 +147,32 @@ def test_best_account_chooses_most_headroom_and_skips_active(tmp_path: Path) -> 
     assert chosen == accounts[2]
 
 
+def test_best_account_rejects_stale_usage_for_an_expired_profile(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    active = tmp_path / "active"
+    expired = tmp_path / "expired"
+    ready = tmp_path / "ready"
+    now = datetime.now(timezone.utc)
+    _profile(main, "org-a", "main-a")
+    _profile(active, "org-a", "active-a")
+    _profile(expired, "org-b", "expired-b", now - timedelta(minutes=1))
+    _profile(ready, "org-c", "ready-c", now + timedelta(hours=6))
+    accounts = [
+        Account("active", active),
+        Account("expired", expired),
+        Account("ready", ready),
+    ]
+
+    chosen = best_account(
+        accounts,
+        [_limits("active", 92), _limits("expired", 10), _limits("ready", 20)],
+        main,
+        now=now,
+    )
+
+    assert chosen == accounts[2]
+
+
 def test_auto_switch_fires_at_one_percent_remaining(tmp_path: Path) -> None:
     main = tmp_path / "main"
     a, b = tmp_path / "a", tmp_path / "b"
@@ -203,3 +238,62 @@ def test_sync_skips_the_write_when_the_profile_is_already_current(tmp_path: Path
 
     assert sync_active_profile([Account("a", saved)], main) is not None
     assert credentials.stat().st_mtime_ns == before
+
+
+def test_auth_recovery_uses_longest_lived_profile_when_usage_is_rate_limited(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "main"
+    short = tmp_path / "short"
+    long = tmp_path / "long"
+    now = datetime.now(timezone.utc)
+    _profile(main, "org-a", "dead", now - timedelta(minutes=1))
+    _profile(short, "org-b", "short", now + timedelta(minutes=10))
+    _profile(long, "org-c", "long", now + timedelta(hours=6))
+    accounts = [Account("short", short), Account("long", long)]
+    unavailable = [
+        AccountLimits(
+            account.name,
+            "max",
+            [],
+            "none",
+            None,
+            error="usage: rate limited (429)",
+            retriable=True,
+        )
+        for account in accounts
+    ]
+
+    assert auth_recovery_account(accounts, unavailable, main, now) == accounts[1]
+
+
+def test_auth_recovery_does_not_copy_dead_main_over_saved_profile(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    saved = tmp_path / "saved"
+    now = datetime.now(timezone.utc)
+    _profile(main, "org-a", "dead-main", now - timedelta(minutes=1))
+    _profile(saved, "org-a", "valid-saved", now + timedelta(hours=6))
+    accounts = [Account("a", saved)]
+    unavailable = [
+        AccountLimits(
+            "a",
+            "max",
+            [],
+            "none",
+            None,
+            error="usage: rate limited (429)",
+            retriable=True,
+        )
+    ]
+
+    result = recover_auth(accounts, unavailable, main, "needs re-login", now)
+
+    assert result.ok is True
+    assert (
+        json.loads((main / ".credentials.json").read_text())["claudeAiOauth"]["accessToken"]
+        == "valid-saved"
+    )
+    assert (
+        json.loads((saved / ".credentials.json").read_text())["claudeAiOauth"]["accessToken"]
+        == "valid-saved"
+    )
