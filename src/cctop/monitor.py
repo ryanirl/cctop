@@ -239,6 +239,10 @@ class FleetMonitor:
         return switch_account(self.accounts, target, self.main_config_dir)
 
     def limits_due(self, now: datetime) -> bool:
+        configured = {account.name for account in self.accounts}
+        represented = {item.account for item in self.limits}
+        if represented != configured:
+            return True
         if self.limits_fetched_at is None:
             return True
         return now - self.limits_fetched_at >= self.limits_interval

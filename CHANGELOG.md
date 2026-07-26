@@ -36,6 +36,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Saved-profile expiry is checked before the usage request, so a logged-out
   account is refreshed or reported as `needs re-login` instead of being
   misclassified when the usage endpoint returns a fleet-wide 429 first.
+- A recent but partial shared cache no longer suppresses accounts without a
+  successful reading; every configured profile remains visible.
 
 ### Preserved
 - Original per-config-directory session monitoring and account provisioning

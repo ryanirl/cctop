@@ -78,3 +78,18 @@ def test_running_monitor_adopts_newer_shared_reading_without_network(
 
     assert result[0].windows[0].percent == 81.0
     assert calls == []
+
+
+def test_recent_partial_cache_does_not_hide_uncached_account(tmp_path: Path) -> None:
+    path = tmp_path / "limits-cache.json"
+    save(path, {"work": _reading()})
+    monitor = FleetMonitor(
+        [
+            Account("work", Path("/work")),
+            Account("needs-login", Path("/needs-login")),
+        ],
+        limits_interval=timedelta(minutes=3),
+        limits_cache_path=path,
+    )
+
+    assert monitor.limits_due(T0 + timedelta(minutes=1)) is True
