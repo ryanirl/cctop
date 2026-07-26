@@ -83,6 +83,36 @@ class FleetMonitor:
         self._main_auth_error: str | None = None
         self._main_auth_checked_at: datetime | None = None
 
+    def _reload_limits_cache(self) -> None:
+        """Adopt newer readings written by another cctop process."""
+        if self._limits_cache_path is None:
+            return
+        shared = load_limits_cache(self._limits_cache_path)
+        account_names = {account.name for account in self.accounts}
+        changed = False
+        for name, item in shared.items():
+            if name not in account_names:
+                continue
+            current = self._good_limits.get(name)
+            if current is None or (
+                item.fetched_at is not None
+                and (current.fetched_at is None or item.fetched_at > current.fetched_at)
+            ):
+                self._good_limits[name] = item
+                changed = True
+        if not changed:
+            return
+        self.limits = [
+            self._good_limits[account.name]
+            for account in self.accounts
+            if account.name in self._good_limits
+        ]
+        fetched = [item.fetched_at for item in self.limits if item.fetched_at is not None]
+        if fetched:
+            newest = max(fetched)
+            if self.limits_fetched_at is None or newest > self.limits_fetched_at:
+                self.limits_fetched_at = newest
+
     def _tailer_for(self, config_dir, session_id: str) -> TranscriptTailer | None:
         """The live tailer for a session, created (and its file located) once."""
         tailer = self._tailers.get(session_id)
@@ -333,6 +363,7 @@ class FleetMonitor:
         forced, so a forced refresh never hammers a rate-limited account.
         """
         now = now or datetime.now(timezone.utc)
+        self._reload_limits_cache()
         if not force and not self.limits_due(now):
             return self.limits
 

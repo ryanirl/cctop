@@ -59,3 +59,22 @@ def test_new_monitor_shows_shared_cache_during_429(tmp_path: Path, monkeypatch) 
     assert result[0].windows[0].percent == 93.0
     assert result[0].windows[0].resets_at == T0 + timedelta(hours=2)
     assert result[0].error == "usage: rate limited (429)"
+
+
+def test_running_monitor_adopts_newer_shared_reading_without_network(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "limits-cache.json"
+    calls = []
+    monitor = FleetMonitor(
+        [Account("work", Path("/work"))],
+        limits_interval=timedelta(minutes=3),
+        limits_cache_path=path,
+    )
+    save(path, {"work": _reading(81.0)})
+    monkeypatch.setattr(monitor_mod, "account_limits", lambda account: calls.append(account))
+
+    result = monitor.poll_limits(T0 + timedelta(minutes=1))
+
+    assert result[0].windows[0].percent == 81.0
+    assert calls == []
