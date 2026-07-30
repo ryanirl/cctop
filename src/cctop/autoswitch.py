@@ -76,8 +76,10 @@ class AutoswitchService:
 
 
 def _binding_percent(limits: AccountLimits) -> float | None:
+    if limits.source != "api":
+        return None
     values = [window.percent for window in limits.windows if window.has_data]
-    return max(values) if limits.source == "api" and values else None
+    return max(values, default=0.0)
 
 
 def _cycle_summary(cycle: AutoswitchCycle) -> str:

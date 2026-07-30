@@ -38,6 +38,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   misclassified when the usage endpoint returns a fleet-wide 429 first.
 - A recent but partial shared cache no longer suppresses accounts without a
   successful reading; every configured profile remains visible.
+- A successful fresh profile whose usage windows have not started now ranks as
+  0% used instead of being excluded from automatic switching as unavailable.
 
 ### Preserved
 - Original per-config-directory session monitoring and account provisioning

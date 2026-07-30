@@ -223,8 +223,14 @@ def sync_active_profile(accounts: list[Account], main_config_dir: Path) -> Switc
 
 
 def _binding_percent(limits: AccountLimits) -> float | None:
+    if limits.source != "api":
+        return None
     values = [window.percent for window in limits.windows if window.has_data]
-    return max(values) if limits.source == "api" and values else None
+    # A successful API response with no started windows is a fresh account at
+    # 0%, not an unknown account. parse_windows marks Anthropic's `0%` entries
+    # without reset timestamps as `has_data=False` so the UI can say "no usage
+    # yet"; candidate selection must still recognize that as maximum headroom.
+    return max(values, default=0.0)
 
 
 def best_account(

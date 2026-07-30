@@ -173,6 +173,27 @@ def test_best_account_rejects_stale_usage_for_an_expired_profile(tmp_path: Path)
     assert chosen == accounts[2]
 
 
+def test_best_account_selects_successful_profile_with_no_usage_yet(tmp_path: Path) -> None:
+    main = tmp_path / "main"
+    active = tmp_path / "active"
+    fresh = tmp_path / "fresh"
+    _profile(main, "org-a", "main-a")
+    _profile(active, "org-a", "saved-a")
+    _profile(fresh, "org-b", "fresh-b")
+    accounts = [Account("active", active), Account("fresh", fresh)]
+    no_usage_yet = AccountLimits(
+        "fresh",
+        "max",
+        [LimitWindow("session", "5h", 0, None, "normal", True, has_data=False)],
+        "api",
+        datetime.now(timezone.utc),
+    )
+
+    chosen = best_account(accounts, [_limits("active", 90), no_usage_yet], main)
+
+    assert chosen == accounts[1]
+
+
 def test_auto_switch_fires_at_one_percent_remaining(tmp_path: Path) -> None:
     main = tmp_path / "main"
     a, b = tmp_path / "a", tmp_path / "b"

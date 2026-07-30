@@ -9,7 +9,7 @@ import cctop.autoswitch as autoswitch_mod
 from cctop.autoswitch import AutoswitchService
 from cctop.collect import Account
 from cctop.config import Config
-from cctop.models import AccountLimits
+from cctop.models import AccountLimits, LimitWindow
 from cctop.switcher import SwitchResult
 
 T0 = datetime(2026, 7, 25, 12, tzinfo=timezone.utc)
@@ -63,3 +63,16 @@ def test_once_does_not_wait(monkeypatch) -> None:
 def test_service_requires_hot_switch() -> None:
     with pytest.raises(ValueError, match="disabled"):
         AutoswitchService.from_config(Config(settings={"hot_switch": False}))
+
+
+def test_summary_reports_successful_no_usage_profile_as_zero() -> None:
+    limits = AccountLimits(
+        "fresh",
+        "max",
+        [LimitWindow("session", "5h", 0, None, "normal", True, has_data=False)],
+        "api",
+        T0,
+    )
+    cycle = autoswitch_mod.AutoswitchCycle("work", [limits], None)
+
+    assert autoswitch_mod._cycle_summary(cycle) == "active work; fresh=0%"
