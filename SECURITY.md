@@ -16,8 +16,8 @@ not do, because a tool that sits next to your credentials should be auditable.
 | macOS Keychain item `Claude Code-credentials-<hash>`, or `~/.claude*/.credentials.json` | the OAuth token used to authenticate the two GETs above |
 | `~/.codex/auth.json` | the token used to authenticate the Codex usage GET |
 
-All of it is read-only. The two usage GETs are plain reads that consume no
-message quota.
+The two usage GETs are plain reads that consume no message quota. Credential
+writes happen only when hot-switch mode is enabled, as described below.
 
 ## What cctop does with your token
 
@@ -28,13 +28,14 @@ message quota.
   account.
 - The token is placed in the `Authorization` header of the usage GET and used
   nowhere else.
-- The token is **never** logged, printed, written to disk by cctop, included in
-  `--json` output, or transmitted anywhere except the provider's own API
-  (`api.anthropic.com` / `chatgpt.com`) that issued it.
+- The token is **never** logged, printed, included in `--json` output, or
+  transmitted anywhere except the provider's own API (`api.anthropic.com` /
+  `chatgpt.com`) that issued it. In hot-switch mode, complete credential
+  records move only between their existing local Keychain/file stores.
 
 ## The only things cctop ever writes
 
-cctop is read-only except for two explicit, additive actions you invoke:
+cctop is read-only except for these account-management actions:
 
 1. **Account provisioning** (`add-account`, the `a` key): creates a new
    `~/.claude-N` directory; with `--alias` appends one shell-rc line (after
@@ -46,9 +47,21 @@ cctop is read-only except for two explicit, additive actions you invoke:
    **Claude Code binary itself** renews its own token at startup (a quota-free,
    non-interactive command). cctop does not write the credential; it delegates
    to the tool that owns it.
+3. **Hot switching** (`hot_switch = true`, the `x` key, `cctop switch`, and the
+   configured automatic threshold): copies a complete saved credential record
+   into the main Claude Code Keychain store and replaces only the
+   `oauthAccount` field in the main config. Before switching away, the current
+   main credential is synced back to its matching saved profile so a rotated
+   refresh token is preserved. If the active login has no stable saved profile,
+   cctop creates one automatically under `~/.config/cctop/profiles/<org-id>`;
+   its credential remains in a per-profile Keychain item (or the existing
+   file-backed format), while the identity file contains only Claude's account
+   metadata. Writes are performed under Claude Code's own advisory
+   credential/config locks; file-backed credentials use atomic replace, and
+   Keychain payloads are sent through `security -i` stdin rather than exposed
+   as plaintext process arguments.
 
-There is deliberately **no** delete, logout, or credential-writing path in
-cctop's own code.
+There is deliberately **no** delete or logout path.
 
 ## Reporting
 

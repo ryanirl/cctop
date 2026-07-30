@@ -32,6 +32,7 @@ class AccountRow:
     dir: Path
     name: str
     provider: str
+    switch_dir: Path | None
     hidden: bool
 
 
@@ -48,6 +49,7 @@ def build_rows(detected: list[Account], config: Config) -> list[AccountRow]:
                 dir=account.config_dir,
                 name=override.name if override and override.name else account.name,
                 provider=account.provider,
+                switch_dir=override.switch_dir if override else None,
                 hidden=bool(override.hidden) if override else False,
             )
         )
@@ -58,6 +60,7 @@ def build_rows(detected: list[Account], config: Config) -> list[AccountRow]:
                     dir=override.dir,
                     name=override.name or override.dir.name.lstrip("."),
                     provider=override.provider or "claude",
+                    switch_dir=override.switch_dir,
                     hidden=override.hidden,
                 )
             )
@@ -97,10 +100,21 @@ class SettingsScreen(ModalScreen):
 
     BINDINGS = [("escape", "cancel", "Close")]
 
-    def __init__(self, interval: float, weeks: int, rows: list[AccountRow]) -> None:
+    def __init__(
+        self,
+        interval: float,
+        weeks: int,
+        main_config_dir: Path,
+        auto_switch_remaining_percent: float,
+        hot_switch: bool,
+        rows: list[AccountRow],
+    ) -> None:
         super().__init__()
         self._interval = interval
         self._weeks = weeks
+        self._main_config_dir = main_config_dir
+        self._auto_switch_remaining_percent = auto_switch_remaining_percent
+        self._hot_switch = hot_switch
         self._rows = rows
 
     def compose(self) -> ComposeResult:
@@ -111,12 +125,27 @@ class SettingsScreen(ModalScreen):
                 yield Input(value=str(int(self._interval)), id="interval", type="integer")
                 yield Label("Heatmap weeks")
                 yield Input(value=str(self._weeks), id="weeks", type="integer")
+                yield Label("Hot switch one main Claude session")
+                yield Switch(value=self._hot_switch, id="hot-switch")
+                yield Label("Main Claude config directory")
+                yield Input(value=_home(self._main_config_dir), id="main-config-dir")
+                yield Label("Auto-switch when remaining (%)")
+                yield Input(
+                    value=str(self._auto_switch_remaining_percent),
+                    id="remaining",
+                    type="number",
+                )
                 yield Label("Accounts  (toggle to show, edit the name)")
                 for index, row in enumerate(self._rows):
                     with Horizontal(classes="acct-row"):
                         yield Switch(value=not row.hidden, id=f"show-{index}")
                         yield Input(value=row.name, id=f"name-{index}")
                         yield Label(_home(row.dir), classes="acct-dir")
+                        if row.switch_dir:
+                            yield Label(
+                                f"login: {_home(row.switch_dir)}",
+                                classes="acct-dir",
+                            )
             with Horizontal(id="settings-actions"):
                 yield Button("Save", variant="success", id="save")
                 yield Button("Cancel", id="cancel")
@@ -141,16 +170,31 @@ class SettingsScreen(ModalScreen):
             return default
 
     def _save(self) -> None:
+        try:
+            remaining = float(self.query_one("#remaining", Input).value)
+        except ValueError:
+            remaining = 1.0
+        remaining = min(99.0, max(0.0, remaining))
         settings = {
             "limits_refresh_seconds": self._int("interval", 180, 10),
             "heatmap_weeks": self._int("weeks", 26, 1),
+            "hot_switch": self.query_one("#hot-switch", Switch).value,
+            "main_config_dir": self.query_one("#main-config-dir", Input).value.strip()
+            or "~/.claude",
+            "auto_switch_remaining_percent": remaining,
         }
         accounts = []
         for index, row in enumerate(self._rows):
             name = self.query_one(f"#name-{index}", Input).value.strip() or row.name
             hidden = not self.query_one(f"#show-{index}", Switch).value
             accounts.append(
-                AccountOverride(dir=row.dir, name=name, provider=row.provider, hidden=hidden)
+                AccountOverride(
+                    dir=row.dir,
+                    name=name,
+                    provider=row.provider,
+                    switch_dir=row.switch_dir,
+                    hidden=hidden,
+                )
             )
         config_module.save_config(settings, accounts)
         self.app.apply_settings()  # type: ignore[attr-defined]

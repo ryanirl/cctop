@@ -34,6 +34,7 @@ class AccountOverride:
     dir: Path
     name: str | None = None
     provider: str | None = None
+    switch_dir: Path | None = None
     hidden: bool = False
 
 
@@ -51,6 +52,29 @@ class Config:
     def heatmap_weeks(self, default: int) -> int:
         value = self.settings.get("heatmap_weeks")
         return int(value) if isinstance(value, int) and value > 0 else default
+
+    def main_config_dir(self, default: Path | None = None) -> Path:
+        """The one Claude state directory whose live sessions are shared.
+
+        Account directories are credential profiles.  Claude itself always runs
+        against this main directory; cctop swaps a selected profile into it.
+        """
+        value = self.settings.get("main_config_dir")
+        if isinstance(value, str) and value.strip():
+            return Path(value).expanduser()
+        return default or Path.home() / ".claude"
+
+    def auto_switch_remaining_percent(self, default: float = 1.0) -> float:
+        """Headroom at which the active Claude profile is rotated."""
+        value = self.settings.get("auto_switch_remaining_percent")
+        if isinstance(value, (int, float)) and 0 <= float(value) < 100:
+            return float(value)
+        return default
+
+    def hot_switch(self, default: bool = False) -> bool:
+        """Use one main Claude session directory and swap saved logins into it."""
+        value = self.settings.get("hot_switch")
+        return value if isinstance(value, bool) else default
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -71,6 +95,9 @@ def load_config(path: Path | None = None) -> Config:
                 dir=Path(str(entry["dir"])).expanduser(),
                 name=entry.get("name"),
                 provider=entry.get("provider"),
+                switch_dir=(
+                    Path(str(entry["switch_dir"])).expanduser() if entry.get("switch_dir") else None
+                ),
                 hidden=bool(entry.get("hidden", False)),
             )
         )
@@ -93,7 +120,13 @@ def save_config(settings: dict, accounts: list[AccountOverride], path: Path | No
     path = path or config_path()
     lines = ["# cctop config, written by the settings screen.", "", "[settings]"]
     for key, value in settings.items():
-        lines.append(f"{key} = {value}")
+        if isinstance(value, bool):
+            lines.append(f"{key} = {'true' if value else 'false'}")
+        elif isinstance(value, str):
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'{key} = "{escaped}"')
+        else:
+            lines.append(f"{key} = {value}")
     for override in accounts:
         lines += [
             "",
@@ -103,6 +136,8 @@ def save_config(settings: dict, accounts: list[AccountOverride], path: Path | No
         ]
         if override.provider:
             lines.append(f'provider = "{override.provider}"')
+        if override.switch_dir:
+            lines.append(f'switch_dir = "{_home_relative(override.switch_dir)}"')
         if override.hidden:
             lines.append("hidden = true")
     path.parent.mkdir(parents=True, exist_ok=True)

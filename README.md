@@ -14,9 +14,9 @@ those up too.
 
 Everything is read from files the tools already write plus a couple of free,
 read-only usage reads; nothing here ever spends message quota. cctop touches
-your credentials only to make those reads, never logs or transmits a token, and
-is read-only except for two explicit, additive account actions. See
-[SECURITY.md](SECURITY.md) for the full trust statement.
+your credentials only for those reads and optional local hot switching, never
+logs or transmits a token, and otherwise changes state only through explicit
+account actions. See [SECURITY.md](SECURITY.md) for the full trust statement.
 
 ![cctop](https://raw.githubusercontent.com/ryanirl/cctop/main/docs/hero.png)
 
@@ -66,14 +66,15 @@ cctop --no-limits     # skip the usage fetch (no network, session table only)
 
 cctop setup           # pick a provider; hand off to its agent to help configure
 cctop accounts        # list discovered accounts (read-only)
+cctop switch [NAME]   # hot-switch main Claude sessions (or choose the best)
 cctop doctor          # read-only self-check (platform, binaries, token/expiry)
 cctop config init     # write a starter ~/.config/cctop/config.toml (optional)
 cctop add-account     # provision a new account (dry-run; see Accounts below)
 ```
 
-TUI keys: `r` refresh now · `R` refresh token · `a` add account · `s` stats ·
-`,` settings · `q` quit. The footer shows a live countdown to the next auto
-refresh; `r` refreshes immediately and resets it.
+TUI keys: `r` refresh now · `R` refresh token · `x` hot-switch account · `a`
+add account · `s` stats · `,` settings · `q` quit. The footer shows a live
+countdown to the next auto refresh; `r` refreshes immediately and resets it.
 
 ### Token refresh (`R`)
 
@@ -82,10 +83,9 @@ lazily when you *use* an account, so an account you are merely monitoring drifts
 past expiry and the usage read starts failing (`token expired`). Press `R` and
 cctop asks the tool that owns the credential to renew it: it runs
 `claude mcp list` under each account's config dir (a quota-free command whose
-startup renews and rewrites the Keychain record). **cctop never writes a
-credential itself** — it only triggers the owner binary and reads the result —
-and it is a no-op on tokens that are still valid. An account whose refresh token
-is itself dead reports "needs re-login" (only a fresh `/login` can fix that).
+startup renews and rewrites the Keychain record). This delegated refresh is a
+no-op on tokens that are still valid. An account whose refresh token is itself
+dead reports "needs re-login" (only a fresh `/login` can fix that).
 
 ### Accounts
 
@@ -101,6 +101,64 @@ all side by side. To add one without leaving cctop, press `a` (or run
 existing config, and signs you in. It is **strictly additive** — it never
 deletes, overwrites, or modifies existing config, credentials, or sessions, and
 only writes a shell alias if you explicitly ask for one.
+
+### Hot-switch mode
+
+The original separate-session mode remains the default. To keep one main
+`~/.claude` session history and use the other config directories only as saved
+login profiles, enable:
+
+```toml
+[settings]
+hot_switch = true
+main_config_dir = "~/.claude"
+auto_switch_remaining_percent = 1
+```
+
+Press `x` (or run `cctop switch NAME`) to swap the healthiest saved login into
+the main Keychain/config store. No aliases or account mapping are required:
+cctop identifies logins by their Claude organization identity, collapses
+duplicate login directories automatically, and labels them from their saved
+email address. If the active login exists only in the mutable main store, cctop
+automatically preserves it under `~/.config/cctop/profiles/` before switching.
+Before each swap, cctop copies the main credential back to its active saved
+profile so refresh-token rotation is retained. Claude Code's own advisory locks
+make the update safe around running sessions; they pick up the new login after
+the macOS Keychain cache refreshes.
+
+While the TUI is running, cctop automatically chooses the healthy Claude
+profile with the most headroom when the active profile reaches 1% remaining
+(99% used). This threshold is configurable with
+`auto_switch_remaining_percent`; a profile that is itself past the threshold is
+chosen only when it still has strictly more headroom than the active profile.
+That lets a 93%-used login take over from one at 100% without allowing two
+equally exhausted logins to ping-pong. Disable `hot_switch` at any time to return
+to the original per-directory session view — the saved profiles cctop manages
+for itself stay out of the account list while it is off.
+
+For rotation that does not depend on keeping the TUI in the foreground, run
+`cctop autoswitch`. It polls immediately and then at `limits_refresh_seconds`,
+refreshes dormant saved logins, and applies the same rotation policy as the TUI.
+It is suitable for a user service such as macOS launchd. Use
+`cctop autoswitch --once` to verify the configured fleet without starting the
+long-running supervisor. Successful usage readings are shared through a local
+metadata-only cache, so another cctop process still shows the last percentages,
+reset times, and reading age when Anthropic temporarily returns HTTP 429.
+Locally expired profiles are refreshed before the usage request; a dead refresh
+token is shown as `needs re-login` rather than being masked by a fleet-wide 429.
+An incomplete cache never hides accounts that lack a successful reading.
+
+Keeping the saved profile in sync is what avoids re-logins: an access token
+lasts ~12-15h, but the refresh token behind it is what actually keeps an
+account alive, and it rotates as Claude Code uses it. cctop copies the current
+main credential back to its saved profile before normal swaps and limits polls
+while that credential is valid, so a profile is never reactivated with a
+superseded refresh token. Only a refresh token that is genuinely dead needs
+`/login` again, and nothing local can substitute for that OAuth round trip. If
+the live main credential is rejected,
+cctop first asks Claude Code to refresh it; when that refresh token is dead,
+cctop preserves the saved copy and immediately activates a ready profile. This
+recovery does not depend on the usage endpoint being available.
 
 ### Configuration (optional)
 

@@ -1,10 +1,10 @@
 """Assemble a FleetSnapshot across one or more accounts.
 
-Each account is a (name, config_dir) pair: cc-0 -> ~/.claude, cc-1 ->
-~/.claude-1, matching the user's shell aliases. The registry gives each
-account's live process table and status; the transcript gives model, tokens,
-cost, and context size; limits.py supplies the real usage-limit gauges. All of
-it is combined into immutable records tagged by account.
+Each account has a session/config directory and may have a separate stable
+credential directory for hot switching. The registry gives each account's live
+process table and status; the transcript gives model, tokens, cost, and context
+size; limits.py supplies the real usage-limit gauges. All of it is combined
+into immutable records tagged by account.
 """
 
 from __future__ import annotations
@@ -41,15 +41,22 @@ _EMPTY_TOTALS = UsageTotals(
 
 @dataclass(frozen=True)
 class Account:
-    """A named account backed by its own config directory.
+    """A named account backed by session state and a saved login.
 
     `provider` selects how sessions and limits are read: "claude" (the default)
-    or "codex".
+    or "codex". `credential_dir`, when set, keeps a stable saved login separate
+    from the mutable main hot-switch session directory.
     """
 
     name: str
     config_dir: Path
     provider: str = "claude"
+    credential_dir: Path | None = None
+
+    @property
+    def auth_dir(self) -> Path:
+        """Stable saved-login directory, separate from live session state."""
+        return self.credential_dir or self.config_dir
 
 
 def default_config_dir() -> Path:
@@ -74,7 +81,7 @@ def _provider_for(config_dir: Path) -> str:
     return "codex" if "codex" in config_dir.name.lower() else "claude"
 
 
-def discover_accounts() -> list[Account]:
+def discover_accounts(include_managed: bool = False) -> list[Account]:
     """Every account auto-detected under the home dir.
 
     ~/.claude is cc-0; any ~/.claude-<suffix> that looks like a real config dir
@@ -82,6 +89,11 @@ def discover_accounts() -> list[Account]:
     ~/.claude-work become cc-work), so it is not limited to the numeric shell-
     alias convention. ~/.codex is added as cx-0. Discovering by glob means a new
     account appears automatically, with no hardcoded list to maintain.
+
+    `include_managed` additionally surfaces cctop's own snapshotted login
+    profiles. They are only meaningful in hot-switch mode, where deduplication
+    folds each one back into the account it was snapshotted from; anywhere else
+    they would double every such account, so they stay hidden by default.
     """
     home = Path.home()
     found: list[tuple[tuple[int, str], Account]] = []
@@ -96,6 +108,18 @@ def discover_accounts() -> list[Account]:
         suffix = path.name[len(".claude-") :]
         order = (int(suffix), "") if suffix.isdigit() else (10_000, suffix)
         found.append((order, Account(f"cc-{suffix}", path)))
+
+    # Profiles snapshotted automatically from the mutable main login live under
+    # cctop's own config directory, outside ~/.claude-* so Claude never treats
+    # them as session homes. They re-enter discovery here on later runs.
+    if include_managed:
+        from . import config as config_module
+
+        managed_root = config_module.config_dir() / "profiles"
+        if managed_root.is_dir():
+            for path in managed_root.iterdir():
+                if path.is_dir() and _looks_like_config_dir(path):
+                    found.append(((20_000, path.name), Account(f"cc-{path.name}", path)))
 
     found.sort(key=lambda item: item[0])
     accounts = [account for _, account in found] or [Account("default", default_config_dir())]
@@ -118,11 +142,12 @@ def resolve_accounts(config=None) -> list[Account]:
 
     if config is None:
         config = config_module.load_config()
+    hot_switch = config.hot_switch()
     overrides = {override.dir: override for override in config.accounts}
 
     result: list[Account] = []
     seen: set[Path] = set()
-    for account in discover_accounts():
+    for account in discover_accounts(include_managed=hot_switch):
         seen.add(account.config_dir)
         override = overrides.get(account.config_dir)
         if override is not None and override.hidden:
@@ -132,6 +157,7 @@ def resolve_accounts(config=None) -> list[Account]:
                 override.name or account.name,
                 account.config_dir,
                 override.provider or account.provider,
+                override.switch_dir,
             )
         result.append(account)
 
@@ -143,10 +169,88 @@ def resolve_accounts(config=None) -> list[Account]:
                 override.name or override.dir.name.lstrip("."),
                 override.dir,
                 override.provider or _provider_for(override.dir),
+                override.switch_dir,
             )
         )
 
+    if hot_switch:
+        return _deduplicate_hot_accounts(result, config.main_config_dir())
     return result
+
+
+def _automatic_name(account: Account) -> str:
+    """An identity-derived label, falling back to the discovered path label."""
+    from . import authctl
+
+    oauth = authctl.read_identity(account.auth_dir).get("oauthAccount")
+    if isinstance(oauth, dict):
+        email = oauth.get("emailAddress")
+        if isinstance(email, str) and email:
+            return email
+    return account.name
+
+
+def _identity_key(account: Account) -> tuple[str, str]:
+    """Stable dedup key for one saved login; unknown identities stay separate."""
+    from . import authctl
+
+    oauth = authctl.read_identity(account.auth_dir).get("oauthAccount")
+    if isinstance(oauth, dict):
+        org = oauth.get("organizationUuid")
+        if isinstance(org, str) and org:
+            return ("org", org)
+        email = oauth.get("emailAddress")
+        if isinstance(email, str) and email:
+            return ("email", email.lower())
+    return ("path", str(account.auth_dir))
+
+
+def _deduplicate_hot_accounts(accounts: list[Account], main_config_dir: Path) -> list[Account]:
+    """Collapse duplicate login dirs while retaining the one main session home."""
+    from . import authctl
+
+    groups: dict[tuple[str, str], list[Account]] = {}
+    order: list[tuple[str, str]] = []
+    codex: list[Account] = []
+    for account in accounts:
+        if account.provider != "claude":
+            codex.append(account)
+            continue
+        key = _identity_key(account)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(account)
+
+    result: list[Account] = []
+    for key in order:
+        group = groups[key]
+        session = next(
+            (account for account in group if account.config_dir == main_config_dir),
+            group[0],
+        )
+        explicit = next((account for account in group if account.credential_dir), None)
+        stable = next(
+            (
+                account
+                for account in group
+                if account.auth_dir != main_config_dir and authctl.has_credentials(account.auth_dir)
+            ),
+            None,
+        )
+        source = explicit or stable or session
+        configured_name = next(
+            (
+                account.name
+                for account in group
+                if not account.name.startswith("cc-") and account.name != "default"
+            ),
+            None,
+        )
+        name = configured_name or _automatic_name(source)
+        result.append(Account(name, session.config_dir, "claude", source.auth_dir))
+
+    return [*result, *codex]
 
 
 # The default account list applies the config file over auto-detection.
@@ -257,7 +361,7 @@ def account_limits(account: Account) -> AccountLimits:
 
     from . import usage
 
-    return usage.fetch_account_limits(account.name, account.config_dir)
+    return usage.fetch_account_limits(account.name, account.auth_dir)
 
 
 def build_snapshot(
@@ -265,6 +369,8 @@ def build_snapshot(
     now: datetime | None = None,
     include_dead: bool = False,
     with_limits: bool = True,
+    hot_switch: bool = False,
+    main_config_dir: Path | None = None,
 ) -> FleetSnapshot:
     """Merge every account's registry, transcripts, and limits into a snapshot.
 
@@ -283,9 +389,18 @@ def build_snapshot(
     for account in accounts:
         if account.provider == "codex":
             states.extend(codex_session_states(account, now))
-            continue
-        for session in read_registry(account.config_dir):
-            states.append(_state_for_session(session, account, now))
+        elif not hot_switch:
+            for session in read_registry(account.config_dir):
+                states.append(_state_for_session(session, account, now))
+
+    if hot_switch:
+        from .switcher import active_account
+
+        main = main_config_dir or Path.home() / ".claude"
+        active = active_account(accounts, main)
+        session_account = Account(active.name if active else "main", main)
+        for session in read_registry(main):
+            states.append(_state_for_session(session, session_account, now))
 
     if not include_dead:
         states = [state for state in states if state.alive]

@@ -4,6 +4,48 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-25
+
+### Added
+- Optional hot-switch mode: saved Claude config directories become credential
+  profiles for one main session directory, with lock-safe Keychain/config swaps,
+  current-token sync-back, `cctop switch [NAME]`, and the TUI `x` key.
+- A headless `cctop autoswitch` supervisor keeps automatic rotation running
+  independently of the TUI and terminal job control.
+- Automatic rotation to the healthy Claude profile with the most headroom at
+  1% remaining (configurable), including delegated refresh of expired saved
+  access tokens without a login/logout cycle. Candidates must have strictly
+  more headroom than the active profile, preventing ping-pong while still using
+  every account that can make progress.
+
+### Changed
+- `get_token` no longer falls back to the default account's Keychain service, so
+  a logged-out config dir reads as having no token instead of borrowing the
+  default account's. The default-profile Keychain and identity-path rules now
+  live in one place (`authctl`) instead of being restated per call site.
+- A rejected live credential now triggers delegated refresh and then immediate
+  profile recovery, even while usage reads are rate-limited. The dead main
+  credential is never synced over its saved profile, and stale usage data can
+  no longer select a locally expired target.
+- Automatic rotation now accepts an above-threshold profile when it has
+  strictly more headroom than the active one, so a fully exhausted login can
+  hand work to a still-usable account without introducing switch ping-pong.
+- The TUI and autoswitch supervisor now share last-good usage metadata. During
+  HTTP 429 backoff, new cctop processes keep showing cached percentages, reset
+  times, and reading age instead of replacing useful data with an error.
+- Saved-profile expiry is checked before the usage request, so a logged-out
+  account is refreshed or reported as `needs re-login` instead of being
+  misclassified when the usage endpoint returns a fleet-wide 429 first.
+- A recent but partial shared cache no longer suppresses accounts without a
+  successful reading; every configured profile remains visible.
+- A successful fresh profile whose usage windows have not started now ranks as
+  0% used instead of being excluded from automatic switching as unavailable.
+
+### Preserved
+- Original per-config-directory session monitoring and account provisioning
+  remain the default behavior when `hot_switch` is disabled; the login profiles
+  cctop snapshots for itself are hidden from account discovery while it is off.
+
 ## [0.2.0] - 2026-07-19
 
 ### Added
@@ -52,5 +94,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `LICENSE` (MIT), `SECURITY.md`, and packaging metadata (distribution
   `cctop-tui`; the command stays `cctop`).
 
+[0.3.0]: https://github.com/ryanirl/cctop/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ryanirl/cctop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ryanirl/cctop/releases/tag/v0.1.0

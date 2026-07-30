@@ -11,9 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cctop.monitor as monitor_mod
+from cctop.authctl import RefreshResult
 from cctop.collect import Account
 from cctop.models import AccountLimits, LimitWindow
 from cctop.monitor import _BACKOFF_BASE, FleetMonitor
+from cctop.switcher import SwitchResult
 
 T0 = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -119,3 +121,87 @@ def test_token_expired_drops_stale_good(monkeypatch) -> None:
     assert result[0].source == "none"
     assert result[0].error == "token expired"
     assert "cc-0" not in monitor._good_limits
+
+
+def test_hot_switch_mode_auto_refreshes_saved_login(monkeypatch) -> None:
+    monitor, calls = _monitor(monkeypatch, [_expired(), _good(8.0)])
+    monitor.hot_switch = True
+    refreshes = []
+
+    def refresh(account: str, config_dir: Path, now: datetime) -> RefreshResult:
+        refreshes.append((account, config_dir, now))
+        return RefreshResult(account, True, "refreshed", now + timedelta(hours=12))
+
+    monkeypatch.setattr(monitor_mod.authctl, "refresh", refresh)
+    monkeypatch.setattr(
+        monitor_mod.authctl,
+        "read_expiry",
+        lambda config_dir: T0 + timedelta(hours=1),
+    )
+    monkeypatch.setattr("cctop.switcher.sync_active_profile", lambda accounts, main: None)
+
+    result = monitor.poll_limits(T0, force=True)
+
+    assert result[0].source == "api"
+    assert calls[0] == 2
+    assert len(refreshes) == 1
+
+
+def test_dead_main_credential_is_not_synced_and_requests_failover(monkeypatch) -> None:
+    account = Account("cc-0", Path("/saved"), "claude")
+    monitor = FleetMonitor(
+        [account],
+        main_config_dir=Path("/main"),
+        hot_switch=True,
+    )
+    monkeypatch.setattr(monitor_mod.authctl, "read_expiry", lambda config_dir: None)
+    monkeypatch.setattr(
+        monitor_mod.authctl,
+        "refresh",
+        lambda name, config_dir, now: RefreshResult(name, False, "needs re-login", None),
+    )
+    syncs = []
+    monkeypatch.setattr(
+        "cctop.switcher.sync_active_profile",
+        lambda accounts, main: syncs.append((accounts, main)),
+    )
+    monkeypatch.setattr(monitor_mod, "account_limits", lambda account: _rate_limited())
+    recovery = []
+
+    def recover(accounts, limits, main, error, now):
+        recovery.append((accounts, limits, main, error, now))
+        return SwitchResult(False, "cc-0", "cc-0", error)
+
+    monitor.poll_limits(T0, force=True)
+    monkeypatch.setattr("cctop.switcher.recover_auth", recover)
+    result = monitor.maybe_auto_switch()
+
+    assert syncs == []
+    assert result == SwitchResult(False, "cc-0", "cc-0", "needs re-login")
+    assert recovery[0][3:] == ("needs re-login", T0)
+
+
+def test_hot_switch_reports_dead_local_login_without_usage_request(monkeypatch) -> None:
+    monitor, calls = _monitor(monkeypatch, [_rate_limited()])
+    monitor.hot_switch = True
+    monkeypatch.setattr(
+        monitor_mod.authctl,
+        "read_expiry",
+        lambda config_dir: (
+            T0 + timedelta(hours=1)
+            if config_dir == monitor.main_config_dir
+            else T0 - timedelta(minutes=1)
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_mod.authctl,
+        "refresh",
+        lambda name, config_dir, now: RefreshResult(name, False, "needs re-login", None),
+    )
+    monkeypatch.setattr("cctop.switcher.sync_active_profile", lambda accounts, main: None)
+
+    result = monitor.poll_limits(T0, force=True)
+
+    assert calls[0] == 0
+    assert result[0].error == "needs re-login"
+    assert result[0].retriable is False

@@ -1,6 +1,6 @@
 [project]
 name = "cctop-tui"
-version = "0.2.0"
+version = "0.3.0"
 description = "A live terminal monitor for multiple Claude Code and OpenAI Codex accounts, in the spirit of nvtop/htop."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -1,13 +1,10 @@
-"""Delegated auth control: let the Claude Code binary refresh its own token.
+"""Claude credential storage and delegated token refresh.
 
-cctop never rewrites a credential itself. A Claude Code OAuth access token lives
-only ~12-15h, and the CLI refreshes it lazily when you use that account, so an
-account you are merely monitoring drifts past expiry and the free usage GET
-starts returning 401. The safe fix is to ask the tool that *owns* the credential
-to renew it: running a lightweight full `claude` command under the account's
-CLAUDE_CONFIG_DIR runs Claude Code's startup auth path, which refreshes and
-persists the Keychain record itself (the same thing that happens when you open
-the account normally). cctop only triggers it and then observes the result.
+Saved account directories remain the durable login profiles.  Switching copies
+one complete credential record into the single main Claude Code store; before
+the next switch, the possibly-refreshed main record is copied back to the active
+profile.  Credentials stay in their existing file or macOS Keychain and are
+never printed.
 
 Which command matters, verified empirically: `claude mcp list` refreshes an
 expired token (it needs the auth context, so startup renews it), while
@@ -15,9 +12,7 @@ expired token (it needs the auth context, so startup renews it), while
 before the refresh). Both are quota-free; we use `mcp list` to refresh and
 `auth status --json` to read login identity.
 
-Everything here is read-only from cctop's side: it invokes headless commands and
-reads the credential's expiry for feedback; it never writes the credential, and
-there is deliberately no logout/delete path.
+There is deliberately no login, logout, or delete path.
 """
 
 from __future__ import annotations
@@ -38,25 +33,147 @@ _REFRESH_ARGS = ("mcp", "list")
 _STATUS_ARGS = ("auth", "status", "--json")
 _COMMAND_TIMEOUT = 30
 
+_USER_BINARY = Path.home() / ".local" / "bin" / "claude"
 _BINARY_FALLBACK = Path("/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
 _KEYCHAIN_SERVICE = "Claude Code-credentials"
+_KEYCHAIN_ACCOUNT = "user"
+_SECURITY_TIMEOUT = 5
+
+
+class CredentialError(RuntimeError):
+    """A credential store could not be read or updated safely."""
 
 
 def find_claude_binary() -> str | None:
     """The real Claude Code executable, or None if it cannot be located.
 
-    Prefers PATH (a `claude` symlink into the npm install); falls back to the
-    known native-build location so the refresh works even when PATH is bare.
+    Prefers PATH (a `claude` symlink into the native install), then the standard
+    user-local link, then the legacy global npm location.  The explicit
+    user-local path matters for launchd, whose deliberately small PATH omits
+    ``~/.local/bin``.
     """
     found = shutil.which("claude")
     if found:
         return found
+    if _USER_BINARY.exists():
+        return str(_USER_BINARY)
     return str(_BINARY_FALLBACK) if _BINARY_FALLBACK.exists() else None
 
 
-def _keychain_service(config_dir: Path) -> str:
+def keychain_service(config_dir: Path) -> str:
+    """The Keychain service name Claude Code uses for a profile on macOS.
+
+    Verified empirically: the default ``~/.claude`` profile owns the bare
+    service name, and every other CLAUDE_CONFIG_DIR gets
+    ``Claude Code-credentials-<first 8 hex of sha256(config_dir_path)>``, which
+    is how a second account stays distinct from the default in one Keychain.
+    """
+    if config_dir == Path.home() / ".claude":
+        return _KEYCHAIN_SERVICE
     digest = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
     return f"{_KEYCHAIN_SERVICE}-{digest}"
+
+
+def identity_path(config_dir: Path) -> Path:
+    """Claude's identity/config file for a profile.
+
+    The default profile is the historical special case at ``~/.claude.json``;
+    custom ``CLAUDE_CONFIG_DIR`` profiles keep it inside their directory.
+    """
+    if config_dir == Path.home() / ".claude":
+        return Path.home() / ".claude.json"
+    return config_dir / ".claude.json"
+
+
+def read_identity(config_dir: Path) -> dict:
+    try:
+        value = json.loads(identity_path(config_dir).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _keychain_read(service: str) -> str | None:
+    command = ["security", "find-generic-password", "-s", service, "-w"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=_SECURITY_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def _quote_security(value: str) -> str:
+    """Quote a non-secret value for security(1)'s interactive command parser."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _keychain_write(service: str, credential: str) -> None:
+    """Update a Keychain item without putting plaintext credential data in argv."""
+    credential_hex = credential.encode("utf-8").hex()
+    command = (
+        "add-generic-password -U "
+        f"-a {_quote_security(_KEYCHAIN_ACCOUNT)} "
+        f"-s {_quote_security(service)} -X {credential_hex}\n"
+    )
+    try:
+        result = subprocess.run(
+            ["security", "-i"],
+            input=command,
+            capture_output=True,
+            text=True,
+            timeout=_SECURITY_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CredentialError(f"Keychain update failed: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit {result.returncode}"
+        raise CredentialError(f"Keychain update failed: {detail}")
+
+
+def read_credentials(config_dir: Path) -> str:
+    """Read one profile's complete credential record, without fallback."""
+    credentials_file = config_dir / ".credentials.json"
+    try:
+        raw = credentials_file.read_text().strip()
+    except OSError:
+        raw = ""
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise CredentialError(f"invalid credentials in {credentials_file}") from error
+        if isinstance(payload.get("claudeAiOauth"), dict):
+            return raw
+
+    keychain_raw = _keychain_read(keychain_service(config_dir))
+    if keychain_raw is None:
+        raise CredentialError(f"no credential found for {config_dir}")
+    try:
+        payload = json.loads(keychain_raw)
+    except json.JSONDecodeError as error:
+        raise CredentialError(f"invalid Keychain credential for {config_dir}") from error
+    if not isinstance(payload.get("claudeAiOauth"), dict):
+        raise CredentialError(f"credential for {config_dir} has no OAuth record")
+    return keychain_raw
+
+
+def write_credentials(config_dir: Path, credential: str) -> None:
+    """Replace one profile's credential in its existing storage backend."""
+    try:
+        payload = json.loads(credential)
+    except json.JSONDecodeError as error:
+        raise CredentialError("refusing to write an invalid credential record") from error
+    if not isinstance(payload.get("claudeAiOauth"), dict):
+        raise CredentialError("refusing to write a credential without OAuth data")
+
+    credentials_file = config_dir / ".credentials.json"
+    if credentials_file.exists():
+        temporary = credentials_file.with_suffix(".json.cctop-new")
+        temporary.write_text(credential)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, credentials_file)
+        return
+    _keychain_write(keychain_service(config_dir), credential)
 
 
 def read_expiry(config_dir: Path) -> datetime | None:
@@ -65,16 +182,9 @@ def read_expiry(config_dir: Path) -> datetime | None:
     Used to show a TTL and to tell whether a refresh actually renewed the token.
     Returns None when the record or its expiresAt field is unavailable.
     """
-    command = ["security", "find-generic-password", "-s", _keychain_service(config_dir), "-w"]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        oauth = json.loads(result.stdout.strip()).get("claudeAiOauth") or {}
-    except json.JSONDecodeError:
+        oauth = json.loads(read_credentials(config_dir)).get("claudeAiOauth") or {}
+    except (CredentialError, json.JSONDecodeError):
         return None
     expires_at = oauth.get("expiresAt")
     if not isinstance(expires_at, (int, float)):
@@ -90,21 +200,11 @@ def has_credentials(config_dir: Path) -> bool:
     (logged-out) dir correctly reads as having no credential rather than
     borrowing the default account's token.
     """
-    credentials_file = config_dir / ".credentials.json"
     try:
-        record = json.loads(credentials_file.read_text())
-        oauth = record.get("claudeAiOauth")
-        if isinstance(oauth, dict) and oauth.get("accessToken"):
-            return True
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    command = ["security", "find-generic-password", "-s", _keychain_service(config_dir), "-w"]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
+        oauth = json.loads(read_credentials(config_dir)).get("claudeAiOauth")
+    except (CredentialError, json.JSONDecodeError):
         return False
-    return result.returncode == 0 and bool(result.stdout.strip())
+    return isinstance(oauth, dict) and bool(oauth.get("accessToken"))
 
 
 @dataclass(frozen=True)
@@ -212,7 +312,7 @@ def refresh(account: str, config_dir: Path, now: datetime | None = None) -> Refr
 
     after = read_expiry(config_dir)
     if after is None or after <= now:
-        return RefreshResult(account, False, "needs re-login - run the account and /login", after)
+        return RefreshResult(account, False, "needs re-login - refresh token itself is dead", after)
 
     renewed = before is None or after > before
     verb = "refreshed" if renewed else "already valid"

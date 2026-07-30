@@ -148,7 +148,8 @@ def _render_limits(limits: list[AccountLimits], now: datetime, console: Console)
 
         gauges = "   ".join(_render_gauge(w, now) for w in account.windows)
         age = _format_age(account.fetched_at, now)
-        console.print(f"{header}   {gauges}   [grey50]{age} ago[/grey50]")
+        cached = f" · cached: {account.error}" if account.error else ""
+        console.print(f"{header}   {gauges}   [grey50]{age} ago{cached}[/grey50]")
 
 
 def _render_table(snapshot: FleetSnapshot, multi_account: bool) -> Table:
@@ -248,30 +249,65 @@ def _snapshot_to_dict(snapshot: FleetSnapshot) -> dict:
     }
 
 
+def _session_dir(
+    account: Account,
+    hot_switch: bool,
+    main_config_dir: Path,
+    active: Account | None,
+) -> Path | None:
+    """Where this account's live sessions actually run, or None if it has none.
+
+    In hot-switch mode every Claude session runs in the one main dir, so only
+    the active profile owns any; another profile's leftover registry would
+    otherwise be counted as that profile's own live sessions.
+    """
+    if hot_switch and account.provider == "claude":
+        return main_config_dir if account == active else None
+    return account.config_dir
+
+
 def _cmd_accounts() -> None:
-    """List the discovered accounts (read-only): tier and login status."""
+    """List discovered profiles, login state, and the hot-switch active profile."""
+    from . import config as config_module
     from . import usage
     from .registry import read_registry
+    from .switcher import active_account
+
+    config = config_module.load_config()
+    hot_switch = config.hot_switch()
+    main_config_dir = config.main_config_dir()
 
     console = Console()
     table = Table(title="cctop accounts", title_style="bold", expand=False)
+    if hot_switch:
+        table.add_column("active", justify="center")
     table.add_column("acct", style="magenta")
-    table.add_column("config dir", style="grey70")
+    table.add_column("login dir", style="grey70")
     table.add_column("tier")
     table.add_column("token", justify="center")
     table.add_column("live", justify="right")
 
-    for account in default_accounts():
-        tier = _tier_label(usage.read_tier(account.config_dir)) or "-"
-        has_token = usage.get_token(account.config_dir) is not None
-        live = sum(1 for _ in read_registry(account.config_dir))
-        table.add_row(
+    accounts = default_accounts()
+    current = active_account(accounts, main_config_dir) if hot_switch else None
+    for account in accounts:
+        if account.provider == "codex":
+            tier = "-"
+            has_token = (account.config_dir / "auth.json").exists()
+        else:
+            tier = _tier_label(usage.read_tier(account.auth_dir)) or "-"
+            has_token = usage.get_token(account.auth_dir) is not None
+        session_dir = _session_dir(account, hot_switch, main_config_dir, current)
+        live = sum(1 for _ in read_registry(session_dir)) if session_dir else 0
+        row = [
             account.name,
-            str(account.config_dir).replace(str(Path.home()), "~"),
+            str(account.auth_dir).replace(str(Path.home()), "~"),
             tier,
             "[green]yes[/green]" if has_token else "[grey50]no[/grey50]",
             str(live),
-        )
+        ]
+        if hot_switch:
+            row.insert(0, "[green]*[/green]" if account == current else "")
+        table.add_row(*row)
     console.print(table)
 
 
@@ -287,10 +323,16 @@ def _cmd_doctor(accounts: list[Account] | None = None) -> None:
     import sys
 
     from . import authctl, usage
+    from . import config as config_module
     from .codex_usage import CODEX_DIR
     from .registry import read_registry
+    from .switcher import active_account
 
     accounts = accounts if accounts is not None else default_accounts()
+    config = config_module.load_config()
+    hot_switch = config.hot_switch()
+    main_config_dir = config.main_config_dir()
+    current = active_account(accounts, main_config_dir) if hot_switch else None
     now = datetime.now(timezone.utc)
     console = Console()
 
@@ -306,11 +348,13 @@ def _cmd_doctor(accounts: list[Account] | None = None) -> None:
     console.print(f"codex      {codex_note}  ({str(CODEX_DIR).replace(str(Path.home()), '~')})\n")
 
     table = Table(title="accounts", title_style="bold", expand=False)
-    for column in ("acct", "provider", "config dir", "token", "expires", "tier", "live"):
+    for column in ("acct", "provider", "login dir", "token", "expires", "tier", "live"):
         table.add_column(column)
 
     for account in accounts:
-        config_display = str(account.config_dir).replace(str(Path.home()), "~")
+        # The login dir, not the session dir: it is where the token, expiry, and
+        # tier reported on this row were actually read from.
+        config_display = str(account.auth_dir).replace(str(Path.home()), "~")
         if account.provider == "codex":
             has_token = (CODEX_DIR / "auth.json").exists()
             table.add_row(
@@ -324,11 +368,12 @@ def _cmd_doctor(accounts: list[Account] | None = None) -> None:
             )
             continue
 
-        has_token = authctl.has_credentials(account.config_dir)
-        expiry = authctl.read_expiry(account.config_dir)
+        has_token = authctl.has_credentials(account.auth_dir)
+        expiry = authctl.read_expiry(account.auth_dir)
         expires = _format_reset(expiry, now) if expiry else "-"
-        tier = _tier_label(usage.read_tier(account.config_dir)) or "-"
-        live = sum(1 for _ in read_registry(account.config_dir))
+        tier = _tier_label(usage.read_tier(account.auth_dir)) or "-"
+        session_dir = _session_dir(account, hot_switch, main_config_dir, current)
+        live = sum(1 for _ in read_registry(session_dir)) if session_dir else 0
         table.add_row(
             account.name,
             "claude",
@@ -518,9 +563,13 @@ def _config_template() -> str:
         "",
         "[settings]",
         "# limits_refresh_seconds = 180   # how often to refetch usage limits",
+        "# hot_switch = false             # true: all Claude sessions use one main dir",
+        '# main_config_dir = "~/.claude"',
+        "# auto_switch_remaining_percent = 1  # rotate at 1% remaining",
         "",
         "# Accounts cctop auto-detected. Rename via `name`, hide with `hidden = true`,",
         "# reorder by moving blocks, or add your own block pointing at any config dir.",
+        "# Hot-switch login stores are matched automatically by account identity.",
     ]
     for account in discover_accounts():
         directory = str(account.config_dir).replace(home, "~", 1)
@@ -533,6 +582,80 @@ def _config_template() -> str:
             "# hidden = false",
         ]
     return "\n".join(lines) + "\n"
+
+
+def _cmd_switch(argv: list[str]) -> None:
+    """Hot-switch the main Claude sessions to a saved profile.
+
+    `cctop switch NAME` activates that profile; with no name, the healthy
+    profile with the most headroom. Both change live credential state, so an
+    unrecognized argument must not be silently read as a profile name.
+    """
+    from . import config as config_module
+    from .collect import account_limits
+    from .switcher import best_account, ensure_stable_accounts, switch_account
+
+    console = Console()
+    if len(argv) > 1 or (argv and argv[0].startswith("-")):
+        console.print("usage: [bold]cctop switch [NAME][/bold]")
+        console.print(
+            "[grey50]with no NAME, picks the healthy profile with the most headroom[/grey50]"
+        )
+        return
+
+    config = config_module.load_config()
+    if not config.hot_switch():
+        console.print(
+            "[red]hot switching is disabled.[/red] Set "
+            "[bold]hot_switch = true[/bold] in cctop settings."
+        )
+        return
+
+    accounts = ensure_stable_accounts(default_accounts(), config.main_config_dir())
+    claude_accounts = [account for account in accounts if account.provider == "claude"]
+    spec = argv[0] if argv else ""
+    if spec:
+        target = next((account for account in claude_accounts if account.name == spec), None)
+        if target is None:
+            console.print(f"[red]unknown Claude profile: {spec}[/red]")
+            return
+    else:
+        limits = [account_limits(account) for account in claude_accounts]
+        target = best_account(accounts, limits, config.main_config_dir())
+        if target is None:
+            console.print("[red]no healthy alternate Claude profile[/red]")
+            return
+
+    result = switch_account(accounts, target, config.main_config_dir())
+    style = "green" if result.ok else "red"
+    console.print(f"[{style}]{result.message}[/{style}]")
+
+
+def _cmd_autoswitch(argv: list[str]) -> None:
+    """Run hot switching without coupling it to an interactive TUI."""
+    from .autoswitch import AutoswitchService
+
+    parser = argparse.ArgumentParser(
+        prog="cctop autoswitch",
+        description="Continuously refresh usage and hot-switch Claude profiles.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Poll and apply the switch policy once, then exit.",
+    )
+    args = parser.parse_args(argv)
+    console = Console()
+    try:
+        service = AutoswitchService.from_config()
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        return
+
+    try:
+        service.run(once=args.once, emit=console.print)
+    except KeyboardInterrupt:
+        console.print("[grey50]autoswitch stopped[/grey50]")
 
 
 def _cmd_config(argv: list[str]) -> None:
@@ -611,7 +734,8 @@ Goal: make sure cctop shows all my accounts, correctly labeled.
      dir  = "~/.claude-work"  # the account's CLAUDE_CONFIG_DIR (or ~/.codex)
      provider = "claude"      # or "codex"
      hidden = false           # true to hide it
-   and [settings] supports limits_refresh_seconds and heatmap_weeks.
+   and [settings] supports limits_refresh_seconds, heatmap_weeks, hot_switch,
+   main_config_dir, and auto_switch_remaining_percent.
 4. Only edit that config file, and be strictly additive: never delete or
    overwrite my credentials, sessions, or other config. Confirm before writing.
 5. When done, tell me to run `cctop`.
@@ -713,6 +837,12 @@ def main() -> None:
     if argv[:1] == ["add-account"]:
         _cmd_add_account(argv[1:])
         return
+    if argv[:1] == ["switch"]:
+        _cmd_switch(argv[1:])
+        return
+    if argv[:1] == ["autoswitch"]:
+        _cmd_autoswitch(argv[1:])
+        return
     if argv[:1] == ["doctor"]:
         _cmd_doctor()
         return
@@ -763,17 +893,26 @@ def main() -> None:
     args = parser.parse_args()
 
     accounts = _resolve_accounts(args)
+    from . import config as config_module
+
+    cfg = config_module.load_config()
+    configured_hot_switch = cfg.hot_switch() and not args.account and args.config_dir is None
+    if configured_hot_switch:
+        from .switcher import ensure_stable_accounts
+
+        accounts = ensure_stable_accounts(accounts, cfg.main_config_dir())
 
     if not args.once and not args.json:
         # Default: launch the live TUI, which polls with its own throttles.
-        from . import config as config_module
         from .app import CctopApp
 
-        cfg = config_module.load_config()
         CctopApp(
             accounts,
             limits_interval=cfg.limits_refresh_seconds(180.0),
             heatmap_weeks=cfg.heatmap_weeks(26),
+            main_config_dir=cfg.main_config_dir(),
+            auto_switch_remaining_percent=cfg.auto_switch_remaining_percent(),
+            hot_switch=configured_hot_switch,
         ).run()
         return
 
@@ -783,6 +922,8 @@ def main() -> None:
         now=now,
         include_dead=args.include_dead,
         with_limits=not args.no_limits,
+        hot_switch=configured_hot_switch,
+        main_config_dir=cfg.main_config_dir(),
     )
 
     if args.json:
