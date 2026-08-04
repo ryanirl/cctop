@@ -214,6 +214,7 @@ class CctopApp(App):
         ("R", "refresh_token", "Refresh token"),
         ("a", "add_account", "Add account"),
         ("s", "stats", "Stats"),
+        ("slash", "search", "Search"),
         ("comma", "settings", "Settings"),
     ]
 
@@ -400,7 +401,7 @@ class CctopApp(App):
                 "default",
             ),
             (f"      usage {age} · {nxt}", MUTED),
-            ("      r refresh · R token · a add · s stats · , settings · q quit", MUTED),
+            ("      / search · r refresh · R token · a add · s stats · , settings · q quit", MUTED),
         )
         self.query_one("#footer", Static).update(footer)
 
@@ -416,6 +417,11 @@ class CctopApp(App):
         from .stats_screen import StatsScreen
 
         self.push_screen(StatsScreen(self.monitor.accounts, date.today()))
+
+    def action_search(self) -> None:
+        from .search_screen import SearchScreen
+
+        self.push_screen(SearchScreen(self.monitor.accounts))
 
     def action_settings(self) -> None:
         from . import config as config_module

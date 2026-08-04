@@ -34,7 +34,7 @@ message quota.
 
 ## The only things cctop ever writes
 
-cctop is read-only except for two explicit, additive actions you invoke:
+cctop is read-only except for explicit actions you invoke:
 
 1. **Account provisioning** (`add-account`, the `a` key): creates a new
    `~/.claude-N` directory; with `--alias` appends one shell-rc line (after
@@ -46,6 +46,11 @@ cctop is read-only except for two explicit, additive actions you invoke:
    **Claude Code binary itself** renews its own token at startup (a quota-free,
    non-interactive command). cctop does not write the credential; it delegates
    to the tool that owns it.
+3. **Session resume** (`Enter` in history search): hands the terminal to
+   `claude --resume` / `codex resume` for the selected session, with
+   `CLAUDE_CONFIG_DIR` pinned to the session's own account. The search itself
+   is a read-only ripgrep scan of the transcript files; any new conversation
+   content is written by the resumed tool, never by cctop.
 
 There is deliberately **no** delete, logout, or credential-writing path in
 cctop's own code.

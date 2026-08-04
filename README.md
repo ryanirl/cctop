@@ -64,6 +64,7 @@ cctop --once          # print a one-shot snapshot and exit
 cctop --json          # emit the snapshot as JSON (for scripting)
 cctop --no-limits     # skip the usage fetch (no network, session table only)
 
+cctop search "query"  # search conversation history across every account
 cctop setup           # pick a provider; hand off to its agent to help configure
 cctop accounts        # list discovered accounts (read-only)
 cctop doctor          # read-only self-check (platform, binaries, token/expiry)
@@ -71,9 +72,29 @@ cctop config init     # write a starter ~/.config/cctop/config.toml (optional)
 cctop add-account     # provision a new account (dry-run; see Accounts below)
 ```
 
-TUI keys: `r` refresh now · `R` refresh token · `a` add account · `s` stats ·
-`,` settings · `q` quit. The footer shows a live countdown to the next auto
-refresh; `r` refreshes immediately and resets it.
+TUI keys: `/` search history · `r` refresh now · `R` refresh token · `a` add
+account · `s` stats · `,` settings · `q` quit. The footer shows a live countdown
+to the next auto refresh; `r` refreshes immediately and resets it.
+
+### History search (`/`, `cctop search`)
+
+Search every conversation you have ever had, across all accounts and both
+providers, live as you type. Results are grouped by session, tagged with the
+owning account (`cc-0`, `cc-1`, `cx-0`, ...), titled from the session's own
+metadata, and previewed with the matching messages highlighted. Press `Enter`
+to resume the selected session **under the account that owns it** (cctop pins
+`CLAUDE_CONFIG_DIR` and the session's working directory and hands the terminal
+to `claude --resume` / `codex resume`); `Ctrl+R` toggles regex mode.
+
+It is fast because the scan is ripgrep: a real `rg` from PATH when present,
+otherwise the ripgrep embedded inside the Claude Code binary itself (validated
+before use), otherwise a pure-Python fallback so search always works. Matches
+are post-filtered so the query must occur in actual message text, never in
+metadata like a session id. No index, no cache, nothing written anywhere.
+
+The same search is scriptable: `cctop search "query" [--regex] [--account NAME]
+[--limit N] [--json]`, where `--json` emits one `{"type": "match", ...}` row
+per hit plus a trailing `{"type": "summary", ...}` row.
 
 ### Token refresh (`R`)
 
@@ -127,6 +148,7 @@ written to it unless you run `config init`.
 | Tokens / context | transcript JSONL, tailed | rollout `token_count` events | free (file) |
 | Usage limits | `GET /api/oauth/usage` (Keychain token) | `GET chatgpt.com/backend-api/codex/usage` (`~/.codex/auth.json` token) | free (GET) |
 | Statistics | `~/.claude*/stats-cache.json` | aggregated from rollout files | free (file) |
+| History search | transcript JSONL, ripgrep scan | rollout files, same scan | free (file) |
 
 ## Providers
 
@@ -146,9 +168,9 @@ another's numbers.
 Undocumented, version-internal formats (the sessions registry, transcript
 schema, usage JSON) are all read defensively and isolated to the collector core
 (`registry`, `transcript`, `usage`, `stats`, `monitor`, `pricing`, `status`,
-`codex*` for the Codex provider, `authctl` for delegated token refresh, and
-`manage` for additive account provisioning), with a thin Textual presentation
-layer on top.
+`codex*` for the Codex provider, `authctl` for delegated token refresh,
+`histsearch`/`ripgrep` for history search, and `manage` for additive account
+provisioning), with a thin Textual presentation layer on top.
 
 ## Notes
 

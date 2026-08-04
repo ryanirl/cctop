@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- History search across every account and both providers: `/` in the TUI opens
+  a live, debounced search over all transcript files (Claude projects/ JSONL
+  and Codex rollouts), grouped by session, tagged with the owning account,
+  titled from session metadata, with the matching messages previewed and the
+  query highlighted. `Enter` resumes the selected session under its own
+  account (`CLAUDE_CONFIG_DIR` pinned, cwd restored) via the owner binary;
+  `Ctrl+R` toggles regex mode.
+- `cctop search QUERY [--regex] [--account NAME] [--limit N] [--json]`: the
+  same search from the CLI; `--json` emits match rows plus a summary row for
+  scripts and skills.
+- The scan backend prefers a real `rg`, falls back to the ripgrep embedded in
+  the Claude Code binary (probed with `--version` before trust), and finally a
+  pure-Python scan, so search works with zero extra dependencies. Matches are
+  post-filtered against decoded message text so metadata (session ids, paths)
+  can never produce a false hit, and literal queries are JSON-escaped for the
+  prefilter so quoted text still matches. Sidechain/subagent transcripts are
+  excluded.
+
 ## [0.2.0] - 2026-07-19
 
 ### Added

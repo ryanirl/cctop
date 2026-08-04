@@ -506,6 +506,99 @@ def _cmd_add_account(argv: list[str]) -> None:
         )
 
 
+def _cmd_search(argv: list[str]) -> None:
+    """`cctop search QUERY`: search all accounts' conversation history.
+
+    Read-only and free: a ripgrep pass over the transcript files every account
+    already has on disk, grouped by session and tagged with the owning account.
+    `--json` emits machine-readable JSONL (one match row per hit plus a summary
+    row) for scripts and skills.
+    """
+    from . import histsearch
+
+    parser = argparse.ArgumentParser(prog="cctop search")
+    parser.add_argument("query", help="Text to search for (case-insensitive).")
+    parser.add_argument("--regex", action="store_true", help="Treat the query as a regex.")
+    parser.add_argument(
+        "--account",
+        action="append",
+        metavar="NAME",
+        default=None,
+        help="Only search this account (repeatable; default: all).",
+    )
+    parser.add_argument("--limit", type=int, default=20, help="Max sessions shown (default 20).")
+    parser.add_argument("--json", action="store_true", help="Emit JSONL match/summary rows.")
+    args = parser.parse_args(argv)
+
+    accounts = default_accounts()
+    if args.account:
+        accounts = [account for account in accounts if account.name in args.account]
+
+    result = histsearch.search_history(
+        args.query,
+        accounts,
+        regex=args.regex,
+        limit_sessions=max(1, args.limit),
+    )
+
+    if args.json:
+        for match in result.sessions:
+            for hit in match.hits:
+                row = {
+                    "type": "match",
+                    "account": match.account,
+                    "provider": match.provider,
+                    "project": match.project,
+                    "session_id": match.session_id,
+                    "title": match.title,
+                    "file_path": str(match.path),
+                    "line_number": hit.line_number,
+                    "role": hit.role,
+                    "timestamp": hit.timestamp.isoformat() if hit.timestamp else None,
+                    "content": hit.snippet,
+                }
+                print(json.dumps(row))
+        summary = {
+            "type": "summary",
+            "sessions": len(result.sessions),
+            "matches": result.total_hits,
+            "truncated": result.truncated,
+            "backend": result.backend,
+        }
+        print(json.dumps(summary))
+        return
+
+    from rich.text import Text
+
+    console = Console()
+    now = datetime.now(timezone.utc)
+    for match in result.sessions:
+        header = Text.assemble(
+            (match.account, "bold #20B2AA"),
+            ("  ", ""),
+            (match.project, "grey50"),
+            ("  ", ""),
+            (match.title, "default"),
+            (
+                f"  {len(match.hits)} match(es) · {_format_age(match.last_timestamp, now)} ago",
+                "grey50",
+            ),
+        )
+        console.print(header)
+        for hit in match.hits[:2]:
+            line = Text.assemble(("  ", ""), (f"{hit.role}: ", "grey50"), (hit.snippet[:200], ""))
+            console.print(line)
+        console.print()
+
+    if not result.sessions:
+        console.print("[grey50]No matches.[/grey50]")
+        return
+    tail = f"{len(result.sessions)} sessions · {result.total_hits} matches · {result.backend}"
+    if result.truncated:
+        tail += " · truncated (raise --limit or narrow the query)"
+    console.print(f"[grey50]{tail}[/grey50]")
+
+
 def _config_template() -> str:
     """A commented starter config pre-populated with the detected accounts."""
     from .collect import discover_accounts
@@ -721,6 +814,9 @@ def main() -> None:
         return
     if argv[:1] == ["setup"]:
         _cmd_setup()
+        return
+    if argv[:1] == ["search"]:
+        _cmd_search(argv[1:])
         return
 
     parser = argparse.ArgumentParser(
