@@ -47,8 +47,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Up` move one vertical cursor through the three zones in order (SEARCH bar,
   PATH bar, results list): down from search focuses path, down from path
   enters the list, up from the first row returns to path, up again to search.
-  A click selects and opens directly; new results always start unselected,
-  and keyboard focus only ever lives in the two bars.
+  A click selects the clicked row (it never opens; `Enter` does); new results
+  always start unselected, and keyboard focus only ever lives in the two bars.
+- Preview equivalence: with no query the preview shows the conversation's
+  last messages (from a bounded 256 KB tail read, so huge transcripts cost
+  the same as small ones) in exactly the shape search hits use, so browsing
+  and searching preview identically.
 - `cctop search` with no query opens the search TUI; with a query it opens
   pre-filled. `--json` or piped stdout prints instead, as before.
 - Richer search results: an explicit provider column, a live marker (a teal

@@ -58,6 +58,19 @@ def _highlight(snippet: str, query: str, regex: bool) -> Text:
     return text
 
 
+class _ResultsTable(DataTable):
+    """A DataTable whose clicks select rows via the screen's single cursor.
+
+    DataTable stops click events from bubbling, so the screen never sees them;
+    this hook on the widget itself hands them over.
+    """
+
+    def on_click(self, event) -> None:
+        screen = self.screen
+        if isinstance(screen, SearchScreen):
+            screen.select_clicked_row(event)
+
+
 class SearchScreen(ModalScreen):
     """A full-screen overlay: query input, session results, match preview."""
 
@@ -131,6 +144,9 @@ class SearchScreen(ModalScreen):
         self._timer: Timer | None = None
         self._result: histsearch.SearchResult | None = None
         self._matches: list[histsearch.SessionMatch] = []
+        # Tail previews (last messages, shown when a session has no hits) are
+        # read on first selection and remembered until the results change.
+        self._tail_cache: dict[Path, list[histsearch.Message]] = {}
         # One cursor: while typing in a bar no row is selected, so enter never
         # opens a session by accident. Down (or a click) selects; up past the
         # first row returns to the bar-only state.
@@ -150,7 +166,7 @@ class SearchScreen(ModalScreen):
             with Container(id="results-box") as box:
                 box.border_title = "RESULTS"
                 yield Static(id="search-status")
-                yield DataTable(id="search-results", cursor_type="row")
+                yield _ResultsTable(id="search-results", cursor_type="row")
                 yield Rule(line_style="dashed")
                 yield Static(id="search-preview")
             yield Static(
@@ -302,6 +318,7 @@ class SearchScreen(ModalScreen):
         # Fresh results always start unselected, so a stale selection can
         # never be opened by an enter meant for the input bar.
         self._set_row_selected(False)
+        self._tail_cache.clear()
 
         result = self._result
         if result is None:
@@ -358,17 +375,35 @@ class SearchScreen(ModalScreen):
             style=MUTED,
         )
 
+        # One preview shape always: the card, then messages. With a query the
+        # messages are the highlighted hits; without one, the conversation's
+        # last messages, so browsing previews exactly like searching.
+        if match.hits:
+            entries = [(hit.role, hit.timestamp, hit.snippet) for hit in match.hits]
+        else:
+            entries = [
+                (message.role, message.timestamp, " ".join(message.text.split())[:600])
+                for message in self._tail_for(match)
+            ]
+
         lines: list = [card]
-        for hit in match.hits[:_PREVIEW_HITS]:
+        for role, timestamp, text in entries[:_PREVIEW_HITS]:
             header = Text()
-            header.append(hit.role, style=TEAL if hit.role == "user" else "default")
-            header.append(f" · {_format_age(hit.timestamp, now)} ago", style=MUTED)
+            header.append(role, style=TEAL if role == "user" else "default")
+            header.append(f" · {_format_age(timestamp, now)} ago", style=MUTED)
             lines.append(header)
-            lines.append(_highlight(hit.snippet, query, self._regex))
+            lines.append(_highlight(text, query, self._regex))
         remaining = len(match.hits) - _PREVIEW_HITS
         if remaining > 0:
             lines.append(Text(f"... {remaining} more matches", style=MUTED))
         widget.update(Group(*lines))
+
+    def _tail_for(self, match: histsearch.SessionMatch) -> list[histsearch.Message]:
+        tail = self._tail_cache.get(match.path)
+        if tail is None:
+            tail = histsearch.tail_messages(match.path, match.provider, count=_PREVIEW_HITS)
+            self._tail_cache[match.path] = tail
+        return tail
 
     def _selected_match(self) -> histsearch.SessionMatch | None:
         if not self._row_selected or not self._matches:
@@ -378,11 +413,19 @@ class SearchScreen(ModalScreen):
             return None
         return self._matches[table.cursor_row]
 
-    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        # The cursor also moves programmatically (table rebuilds); only a real
-        # selection should drive the preview.
-        if self._row_selected:
-            self._render_preview()
+    def select_clicked_row(self, event) -> None:
+        """Clicking a row moves the one cursor to it, like arrowing there.
+
+        Selection only; enter opens. Called by the table (clicks do not bubble
+        out of it), with the row taken from the clicked cell's metadata.
+        """
+        row = event.style.meta.get("row")
+        if not isinstance(row, int) or not 0 <= row < len(self._matches):
+            return
+        table = self.query_one("#search-results", DataTable)
+        self._set_row_selected(True)
+        table.move_cursor(row=row, animate=False)
+        self._render_preview()
 
     # -- open the transcript viewer --------------------------------------------
 
@@ -390,11 +433,6 @@ class SearchScreen(ModalScreen):
         # Enter in a bar opens nothing unless a row was explicitly selected.
         if self._row_selected:
             self._open_viewer()
-
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        # A click is an explicit selection: select the row and open it.
-        self._set_row_selected(True)
-        self._open_viewer()
 
     def _open_viewer(self) -> None:
         """Open the selected session's transcript to read before resuming."""

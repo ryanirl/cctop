@@ -232,6 +232,43 @@ def _dialogue_text(message: dict) -> str:
 _MESSAGE_MARKERS = ('"type":"user"', '"type":"assistant"', '"type": "user"', '"type": "assistant"')
 _CODEX_MARKER = '"event_msg"'
 
+# How far from the end of a transcript the tail preview reads: enough for the
+# last few dialogue messages of any real session, constant regardless of size.
+_TAIL_BYTES = 262_144
+
+
+def _parse_dialogue_line(line: str, provider: str) -> Message | None:
+    """One transcript line as a dialogue Message, or None for anything else."""
+    if provider == "codex":
+        if _CODEX_MARKER not in line:
+            return None
+    elif not any(marker in line for marker in _MESSAGE_MARKERS):
+        return None
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+
+    if provider == "codex":
+        parsed = _parse_codex_line(record)
+        if parsed is None:
+            return None
+        role, text, timestamp, _, _ = parsed
+    else:
+        if record.get("type") not in ("user", "assistant") or record.get("isSidechain"):
+            return None
+        message = record.get("message")
+        if not isinstance(message, dict):
+            return None
+        role = str(record.get("type"))
+        text = _dialogue_text(message)
+        timestamp = _parse_timestamp(record.get("timestamp"))
+    if not text.strip():
+        return None
+    return Message(role, text, timestamp)
+
 
 def read_conversation(
     path: Path,
@@ -252,43 +289,50 @@ def read_conversation(
     try:
         with path.open(encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                if provider == "codex":
-                    if _CODEX_MARKER not in line:
-                        continue
-                elif not any(marker in line for marker in _MESSAGE_MARKERS):
+                message = _parse_dialogue_line(line, provider)
+                if message is None:
                     continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-
-                if provider == "codex":
-                    parsed = _parse_codex_line(record)
-                    if parsed is None:
-                        continue
-                    role, text, timestamp, _, _ = parsed
-                else:
-                    if record.get("type") not in ("user", "assistant") or record.get("isSidechain"):
-                        continue
-                    message = record.get("message")
-                    if not isinstance(message, dict):
-                        continue
-                    role = str(record.get("type"))
-                    text = _dialogue_text(message)
-                    timestamp = _parse_timestamp(record.get("timestamp"))
-                if not text.strip():
-                    continue
-
-                if len(text) > max_chars:
-                    text = text[:max_chars] + " ... (truncated)"
-                kept.append(Message(role, text, timestamp))
+                if len(message.text) > max_chars:
+                    message = Message(
+                        message.role,
+                        message.text[:max_chars] + " ... (truncated)",
+                        message.timestamp,
+                    )
+                kept.append(message)
                 total += 1
     except OSError:
         return [], False
 
     return list(kept), total > len(kept)
+
+
+def tail_messages(path: Path, provider: str, count: int = 4) -> list[Message]:
+    """The session's last few dialogue messages, from a bounded tail read.
+
+    Seeks near the end and parses only that window, so previewing a session
+    with no query (where there are no hits to show) costs the same for a
+    100 MB transcript as for a tiny one.
+    """
+    from collections import deque
+
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - _TAIL_BYTES))
+            window = handle.read()
+    except OSError:
+        return []
+
+    lines = window.decode("utf-8", "replace").splitlines()
+    if size > _TAIL_BYTES and lines:
+        lines = lines[1:]  # the first line of the window is almost surely partial
+
+    kept: deque[Message] = deque(maxlen=count)
+    for line in lines:
+        message = _parse_dialogue_line(line, provider)
+        if message is not None:
+            kept.append(message)
+    return list(kept)
 
 
 def _match_span(text: str, query: str, pattern: re.Pattern[str] | None) -> tuple[int, int] | None:

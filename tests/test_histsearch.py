@@ -317,6 +317,29 @@ def test_read_conversation_caps_keep_the_tail(tmp_path: Path) -> None:
     assert [m.text for m in messages] == ["message 7", "message 8", "message 9"]
 
 
+def test_tail_messages_returns_last_dialogue(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    lines = [_claude_line(f"message {index}") for index in range(10)]
+    path.write_text("\n".join(lines) + "\n")
+
+    tail = histsearch.tail_messages(path, "claude", count=3)
+
+    assert [message.text for message in tail] == ["message 7", "message 8", "message 9"]
+
+
+def test_tail_messages_bounded_window_on_large_file(tmp_path: Path) -> None:
+    # A transcript bigger than the tail window: the (partial) first line of
+    # the window is dropped and only the trailing messages are parsed.
+    path = tmp_path / "big.jsonl"
+    padding = json.dumps({"type": "file-history-snapshot", "snapshot": "x" * 400_000})
+    lines = [padding, _claude_line("early message"), padding, _claude_line("final message")]
+    path.write_text("\n".join(lines) + "\n")
+
+    tail = histsearch.tail_messages(path, "claude", count=4)
+
+    assert [message.text for message in tail] == ["final message"]
+
+
 def test_new_terminal_script_pins_account_and_cwd(tmp_path: Path) -> None:
     plan = histsearch.ResumePlan(
         argv=["/usr/local/bin/claude", "--resume", "abc"],
