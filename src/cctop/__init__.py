@@ -7,4 +7,4 @@ version-internal on-disk formats is contained in the collector core so drift is
 isolated to one place.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

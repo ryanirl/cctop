@@ -527,10 +527,10 @@ class CctopApp(App):
     def action_refresh_token(self) -> None:
         """Ask the owner binary to renew each Claude account's expired token.
 
-        cctop writes no credential: the delegated `claude auth status` run does
+        cctop writes no credential: the delegated `claude mcp list` run does
         the refresh. Runs off the UI thread since it shells out per account.
         """
-        self.notify("Refreshing tokens via claude auth status...", timeout=3)
+        self.notify("Refreshing tokens via the claude binary...", timeout=3)
         self._refresh_token()
 
     @work(thread=True, exclusive=True, group="token")
