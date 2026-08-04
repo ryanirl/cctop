@@ -936,10 +936,24 @@ def main() -> None:
             accounts,
             limits_interval=cfg.limits_refresh_seconds(180.0),
             heatmap_weeks=cfg.heatmap_weeks(26),
+            auto_refresh_tokens=cfg.auto_refresh_tokens(True),
         ).run()
         return
 
     now = datetime.now(timezone.utc)
+
+    if not args.no_limits:
+        # One-shot runs get the same freshness guarantee as the TUI: renew any
+        # at-or-past-expiry token (delegated to the owner binary) before the
+        # usage fetch, so a snapshot never opens on "token expired".
+        from . import authctl
+        from . import config as config_module
+
+        if config_module.load_config().auto_refresh_tokens(True):
+            for account in accounts:
+                if account.provider == "claude":
+                    authctl.ensure_fresh(account.name, account.config_dir, now)
+
     snapshot = build_snapshot(
         accounts,
         now=now,

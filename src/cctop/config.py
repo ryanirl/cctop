@@ -56,6 +56,10 @@ class Config:
         value = self.settings.get("heatmap_weeks")
         return int(value) if isinstance(value, int) and value > 0 else default
 
+    def auto_refresh_tokens(self, default: bool = True) -> bool:
+        value = self.settings.get("auto_refresh_tokens")
+        return value if isinstance(value, bool) else default
+
 
 def load_config(path: Path | None = None) -> Config:
     """Load the config file, or an empty Config when it is absent/unparseable."""
@@ -97,7 +101,9 @@ def save_config(settings: dict, accounts: list[AccountOverride], path: Path | No
     path = path or config_path()
     lines = ["# cctop config, written by the settings screen.", "", "[settings]"]
     for key, value in settings.items():
-        lines.append(f"{key} = {value}")
+        # TOML booleans are lowercase; Python's str(True) is not valid TOML.
+        literal = ("true" if value else "false") if isinstance(value, bool) else str(value)
+        lines.append(f"{key} = {literal}")
     for override in accounts:
         lines += [
             "",

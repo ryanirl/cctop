@@ -28,7 +28,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # `mcp list` is a full `claude` startup that runs auth-init (which refreshes an
@@ -59,12 +59,28 @@ def _keychain_service(config_dir: Path) -> str:
     return f"{_KEYCHAIN_SERVICE}-{digest}"
 
 
-def read_expiry(config_dir: Path) -> datetime | None:
-    """The access token's expiry from the account's Keychain record (read-only).
+def _expiry_from_millis(value: object) -> datetime | None:
+    if not isinstance(value, (int, float)):
+        return None
+    return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
 
-    Used to show a TTL and to tell whether a refresh actually renewed the token.
-    Returns None when the record or its expiresAt field is unavailable.
+
+def read_expiry(config_dir: Path) -> datetime | None:
+    """The access token's expiry from the account's own store (read-only).
+
+    Prefers the on-disk credentials file (no subprocess), then the per-dir
+    Keychain record, mirroring get_token's resolution order. Used to show a
+    TTL, to decide whether a proactive refresh is due, and to tell whether a
+    refresh actually renewed the token. None when unavailable.
     """
+    try:
+        record = json.loads((config_dir / ".credentials.json").read_text())
+        expiry = _expiry_from_millis((record.get("claudeAiOauth") or {}).get("expiresAt"))
+        if expiry is not None:
+            return expiry
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+
     command = ["security", "find-generic-password", "-s", _keychain_service(config_dir), "-w"]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
@@ -76,10 +92,7 @@ def read_expiry(config_dir: Path) -> datetime | None:
         oauth = json.loads(result.stdout.strip()).get("claudeAiOauth") or {}
     except json.JSONDecodeError:
         return None
-    expires_at = oauth.get("expiresAt")
-    if not isinstance(expires_at, (int, float)):
-        return None
-    return datetime.fromtimestamp(expires_at / 1000, tz=timezone.utc)
+    return _expiry_from_millis(oauth.get("expiresAt"))
 
 
 def has_credentials(config_dir: Path) -> bool:
@@ -192,6 +205,28 @@ def _run_refresh_trigger(config_dir: Path) -> str | None:
     except (OSError, subprocess.SubprocessError) as error:
         return f"refresh failed: {error}"
     return None
+
+
+# How close to expiry a token must be before a proactive refresh is worth it.
+# Well inside the ~12-15h token lifetime, and generous enough that a 3-minute
+# poll cadence gets many chances before the token actually lapses.
+_REFRESH_MARGIN = timedelta(minutes=30)
+
+
+def ensure_fresh(
+    account: str, config_dir: Path, now: datetime | None = None
+) -> RefreshResult | None:
+    """Delegated refresh only when the stored token is at or past its margin.
+
+    None means nothing needed doing: the expiry is comfortably in the future,
+    or it is unreadable (the reactive 401 path is the safety net for that).
+    """
+    now = now or datetime.now(timezone.utc)
+
+    expiry = read_expiry(config_dir)
+    if expiry is None or expiry - now > _REFRESH_MARGIN:
+        return None
+    return refresh(account, config_dir, now)
 
 
 def refresh(account: str, config_dir: Path, now: datetime | None = None) -> RefreshResult:

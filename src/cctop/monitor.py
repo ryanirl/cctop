@@ -9,6 +9,7 @@ fetch so the free-but-networked limits call runs on its own slower cadence.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from . import authctl
@@ -29,6 +30,15 @@ CODEX_INTERVAL = timedelta(seconds=5)
 # here, double each consecutive failure, cap so it always recovers eventually.
 _BACKOFF_BASE = timedelta(seconds=60)
 _BACKOFF_CAP = timedelta(minutes=15)
+# After a delegated token refresh fails (the refresh token itself is dead and
+# only /login can fix it), wait this long before letting another automatic
+# attempt spawn the owner binary again.
+_AUTH_RETRY = timedelta(minutes=30)
+# Claude Code refreshes on its own schedule and may judge a token inside our
+# proactive margin "already valid" (observed live at 1.2h remaining). Space
+# proactive re-attempts out after such a no-op instead of spawning the binary
+# every poll; the reactive 401 path stays armed the whole time.
+_PROACTIVE_NOOP_RETRY = timedelta(minutes=5)
 
 _EMPTY_TOTALS = UsageTotals(0, 0, 0, 0, 0.0)
 
@@ -40,9 +50,11 @@ class FleetMonitor:
         self,
         accounts: list[Account],
         limits_interval: timedelta = DEFAULT_LIMITS_INTERVAL,
+        auto_refresh_tokens: bool = True,
     ) -> None:
         self.accounts = accounts
         self.limits_interval = limits_interval
+        self.auto_refresh_tokens = auto_refresh_tokens
 
         self._tailers: dict[str, TranscriptTailer] = {}
         self.limits: list[AccountLimits] = []
@@ -56,6 +68,15 @@ class FleetMonitor:
         self._good_limits: dict[str, AccountLimits] = {}
         self._cooldown_until: dict[str, datetime] = {}
         self._backoff: dict[str, timedelta] = {}
+
+        # Automatic token-refresh state: when an account may attempt another
+        # delegated refresh after a failure, the expiry reading recorded at
+        # that failure (a changed reading means the user logged in, which
+        # clears the failed state by itself), and one-line notices for the UI.
+        self._auth_cooldown_until: dict[str, datetime] = {}
+        self._auth_failed_expiry: dict[str, datetime | None] = {}
+        self._proactive_noop_until: dict[str, datetime] = {}
+        self._auth_notices: list[str] = []
 
     def _tailer_for(self, config_dir, session_id: str) -> TranscriptTailer | None:
         """The live tailer for a session, created (and its file located) once."""
@@ -134,6 +155,80 @@ class FleetMonitor:
             return True
         return now - self.limits_fetched_at >= self.limits_interval
 
+    # -- automatic token refresh (delegated to the owner binary) ---------------
+
+    def _auth_blocked(self, account: Account, now: datetime) -> bool:
+        """Whether automatic refresh must not attempt for this account now.
+
+        Blocked when the feature is off, the provider has no delegated refresh
+        (Codex refreshes on its own use), a failed attempt is cooling down, or
+        the token is the same one a refresh already failed on: that state only
+        a /login can change, and a changed expiry reading is how we see it did.
+        """
+        if not self.auto_refresh_tokens or account.provider != "claude":
+            return True
+
+        name = account.name
+        stored = self._auth_failed_expiry.get(name)
+        if stored is not None:
+            if authctl.read_expiry(account.config_dir) == stored:
+                return True
+            # The stored expiry changed: a real /login happened; start fresh.
+            del self._auth_failed_expiry[name]
+            self._auth_cooldown_until.pop(name, None)
+        # A None reading at failure time cannot identify the token, so the
+        # cooldown below is what bounds repeat attempts in that case.
+
+        cooldown = self._auth_cooldown_until.get(name)
+        return cooldown is not None and now < cooldown
+
+    def _record_auth_attempt(self, account: Account, result: RefreshResult, now: datetime) -> bool:
+        """Book-keep one delegated refresh; True when the token is now valid."""
+        if result.ok:
+            if result.message == "refreshed":
+                self._auth_notices.append(f"{account.name}: token auto-refreshed")
+            return True
+
+        self._auth_cooldown_until[account.name] = now + _AUTH_RETRY
+        self._auth_failed_expiry[account.name] = authctl.read_expiry(account.config_dir)
+        self._auth_notices.append(f"{account.name}: token needs /login")
+        return False
+
+    def _refresh_token_proactively(self, account: Account, now: datetime) -> None:
+        """Renew a near-expiry token before fetching, so 401s never happen."""
+        if self._auth_blocked(account, now):
+            return
+        noop_until = self._proactive_noop_until.get(account.name)
+        if noop_until is not None and now < noop_until:
+            return
+
+        attempt = authctl.ensure_fresh(account.name, account.config_dir, now)
+        if attempt is None:
+            return
+        if self._record_auth_attempt(account, attempt, now) and attempt.message == "already valid":
+            # The owner binary judged the token still fine (its refresh margin
+            # is tighter than ours): re-check later rather than every poll.
+            self._proactive_noop_until[account.name] = now + _PROACTIVE_NOOP_RETRY
+
+    def _refresh_token_reactively(self, account: Account, now: datetime) -> bool:
+        """After a 401: one delegated refresh; True when a refetch is worth it.
+
+        The 401 itself is the evidence the token lapsed (covers the race where
+        it expired between the proactive check and the GET, and stores whose
+        expiry is unreadable), so no expiry margin applies here.
+        """
+        if self._auth_blocked(account, now):
+            return False
+        attempt = authctl.refresh(account.name, account.config_dir, now)
+        return self._record_auth_attempt(account, attempt, now)
+
+    def pop_auth_notices(self) -> list[str]:
+        """Drain the one-line refresh notices for the UI to toast."""
+        notices, self._auth_notices = self._auth_notices, []
+        return notices
+
+    # -- limits fetching -------------------------------------------------------
+
     def _fetch_limits_one(self, account: Account, now: datetime) -> AccountLimits:
         """Fetch one account's limits with rate-limit backoff.
 
@@ -153,7 +248,14 @@ class FleetMonitor:
                 name, None, [], "none", None, error="rate limited, retrying", retriable=True
             )
 
+        self._refresh_token_proactively(account, now)
         result = account_limits(account)
+        if result.source != "api" and result.auth_expired:
+            # The reactive safety net: refresh via the owner binary and refetch
+            # in the same cycle, so the expired state is never rendered while
+            # the refresh path works.
+            if self._refresh_token_reactively(account, now):
+                result = account_limits(account)
 
         if result.source == "api":
             self._good_limits[name] = result
@@ -174,6 +276,10 @@ class FleetMonitor:
         # Non-retriable (token expired, wrong credential): a real, actionable
         # state. Drop any stale-good so the UI shows what the user must fix.
         self._good_limits.pop(name, None)
+        if result.auth_expired and name in self._auth_failed_expiry:
+            # Auto-refresh already tried and failed: the refresh token itself
+            # is dead, so say the one thing that actually fixes it.
+            result = replace(result, error=f"needs /login - open {name} and run /login")
         return result
 
     def poll_limits(
@@ -221,6 +327,12 @@ class FleetMonitor:
         just "refresh into another 429").
         """
         now = now or datetime.now(timezone.utc)
+
+        # A manual refresh overrides the automatic policy's memory: clear the
+        # failed-state markers so the explicit attempt is never suppressed.
+        self._auth_cooldown_until.clear()
+        self._auth_failed_expiry.clear()
+        self._proactive_noop_until.clear()
 
         results = [
             authctl.refresh(account.name, account.config_dir, now)

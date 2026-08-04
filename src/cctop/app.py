@@ -223,11 +223,13 @@ class CctopApp(App):
         accounts: list[Account],
         limits_interval: float = 180.0,
         heatmap_weeks: int = 26,
+        auto_refresh_tokens: bool = True,
     ) -> None:
         super().__init__()
-        self.monitor = FleetMonitor(accounts)
+        self.monitor = FleetMonitor(accounts, auto_refresh_tokens=auto_refresh_tokens)
         self._limits_interval = limits_interval
         self._heatmap_weeks = heatmap_weeks
+        self._auto_refresh_tokens = auto_refresh_tokens
         self._limits_timer: Timer | None = None
         self._states_by_id: dict[str, SessionState] = {}
         self._selected_session_id: str | None = None
@@ -429,7 +431,14 @@ class CctopApp(App):
         from .settings_screen import SettingsScreen, build_rows
 
         rows = build_rows(discover_accounts(), config_module.load_config())
-        self.push_screen(SettingsScreen(self._limits_interval, self._heatmap_weeks, rows))
+        self.push_screen(
+            SettingsScreen(
+                self._limits_interval,
+                self._heatmap_weeks,
+                rows,
+                auto_refresh_tokens=self._auto_refresh_tokens,
+            )
+        )
 
     def apply_settings(self) -> None:
         """Reload the config file and apply it live (called by the settings screen).
@@ -445,7 +454,9 @@ class CctopApp(App):
         config = config_module.load_config()
         self._limits_interval = config.limits_refresh_seconds(180.0)
         self._heatmap_weeks = config.heatmap_weeks(26)
+        self._auto_refresh_tokens = config.auto_refresh_tokens(True)
         self.monitor.limits_interval = timedelta(seconds=self._limits_interval)
+        self.monitor.auto_refresh_tokens = self._auto_refresh_tokens
         self.monitor.accounts = resolve_accounts(config)
 
         self._reschedule_limits_timer()
@@ -560,6 +571,12 @@ class CctopApp(App):
         width = usage.size.width or self.size.width
         content = _render_usage(limits, now, width) if limits else Text("no accounts", style=MUTED)
         usage.update(content)
+
+        for notice in self.monitor.pop_auth_notices():
+            if "/login" in notice:
+                self.notify(notice, title="token refresh", severity="warning", timeout=6)
+            else:
+                self.notify(notice, title="token refresh", timeout=6)
 
     def on_resize(self, event) -> None:
         # Re-lay the usage panel to the new width so accounts reflow/wrap live,

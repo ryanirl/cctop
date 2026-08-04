@@ -97,11 +97,18 @@ class SettingsScreen(ModalScreen):
 
     BINDINGS = [("escape", "cancel", "Close")]
 
-    def __init__(self, interval: float, weeks: int, rows: list[AccountRow]) -> None:
+    def __init__(
+        self,
+        interval: float,
+        weeks: int,
+        rows: list[AccountRow],
+        auto_refresh_tokens: bool = True,
+    ) -> None:
         super().__init__()
         self._interval = interval
         self._weeks = weeks
         self._rows = rows
+        self._auto_refresh_tokens = auto_refresh_tokens
 
     def compose(self) -> ComposeResult:
         with Container(id="settings-box") as box:
@@ -111,6 +118,8 @@ class SettingsScreen(ModalScreen):
                 yield Input(value=str(int(self._interval)), id="interval", type="integer")
                 yield Label("Heatmap weeks")
                 yield Input(value=str(self._weeks), id="weeks", type="integer")
+                yield Label("Auto-refresh expiring tokens (via the claude binary)")
+                yield Switch(value=self._auto_refresh_tokens, id="auto-refresh")
                 yield Label("Accounts  (toggle to show, edit the name)")
                 for index, row in enumerate(self._rows):
                     with Horizontal(classes="acct-row"):
@@ -144,6 +153,7 @@ class SettingsScreen(ModalScreen):
         settings = {
             "limits_refresh_seconds": self._int("interval", 180, 10),
             "heatmap_weeks": self._int("weeks", 26, 1),
+            "auto_refresh_tokens": self.query_one("#auto-refresh", Switch).value,
         }
         accounts = []
         for index, row in enumerate(self._rows):

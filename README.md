@@ -119,17 +119,21 @@ before use), otherwise a pure-Python fallback so search always works. Matches
 are post-filtered so the query must occur in actual message text, never in
 metadata like a session id. No index, no cache, nothing written anywhere.
 
-### Token refresh (`R`)
+### Token refresh (automatic, and `R`)
 
 A Claude Code OAuth access token lives only ~12-15h, and the CLI refreshes it
-lazily when you *use* an account, so an account you are merely monitoring drifts
-past expiry and the usage read starts failing (`token expired`). Press `R` and
-cctop asks the tool that owns the credential to renew it: it runs
-`claude mcp list` under each account's config dir (a quota-free command whose
+lazily when you *use* an account, so an account you are merely monitoring
+drifts past expiry. **cctop keeps tokens fresh automatically**: each usage
+poll renews any token at or near expiry, and a 401 mid-cycle triggers one
+renewal and an immediate refetch, so the "token expired" state is never shown
+while the refresh path works. The renewal is always delegated: cctop runs
+`claude mcp list` under the account's config dir (a quota-free command whose
 startup renews and rewrites the Keychain record). **cctop never writes a
-credential itself** — it only triggers the owner binary and reads the result —
-and it is a no-op on tokens that are still valid. An account whose refresh token
-is itself dead reports "needs re-login" (only a fresh `/login` can fix that).
+credential itself** — it only triggers the owner binary and reads the result.
+Failed attempts back off and go quiet until you actually `/login` (a dead
+*refresh* token is the one thing only a fresh `/login` can fix; cctop then
+says exactly that, once). Disable with `auto_refresh_tokens = false` in the
+config or the settings screen; `R` remains the manual, force-it-now version.
 
 ### Accounts
 

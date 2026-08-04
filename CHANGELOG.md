@@ -7,6 +7,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Automatic token refresh: the "token expired - run cc-N" state is gone for
+  working accounts. Each usage poll proactively renews any Claude token at or
+  near expiry, and a 401 mid-cycle triggers one delegated renewal plus an
+  immediate refetch in the same cycle; one-shot runs (`--once`, `--json`) get
+  the same check before fetching. The renewal is always delegated to the
+  Claude Code binary (the `R` mechanism); cctop still never writes a
+  credential. Failed attempts back off for 30 minutes and stick as a single
+  "needs /login" state that clears itself when a real login changes the
+  stored token expiry; a no-op attempt (Claude Code judging the token still
+  valid inside cctop's margin) spaces proactive re-checks out to every 5
+  minutes while the reactive 401 path stays armed. Configurable via
+  `auto_refresh_tokens` (default on) in the config file and settings screen;
+  `R` remains the manual force. Token expiry is now also readable from
+  `.credentials.json`, not just the Keychain.
 - History search across every account and both providers: `/` in the TUI opens
   a live, debounced search over all transcript files (Claude projects/ JSONL
   and Codex rollouts), grouped by session, tagged with the owning account,

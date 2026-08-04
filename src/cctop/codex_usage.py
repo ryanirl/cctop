@@ -132,7 +132,13 @@ def fetch_account_limits(account: str = "cx-0") -> AccountLimits:
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):
             return AccountLimits(
-                account, None, [], "none", None, error="token expired - run codex to refresh"
+                account,
+                None,
+                [],
+                "none",
+                None,
+                error="token expired - run codex to refresh",
+                auth_expired=True,
             )
         if error.code == 429 or error.code >= 500:
             retry_after: float | None = None

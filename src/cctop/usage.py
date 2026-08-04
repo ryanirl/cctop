@@ -217,11 +217,18 @@ def fetch_account_limits(account: str, config_dir: Path) -> AccountLimits:
 
     status, headers, body = _get(f"{API_BASE}{USAGE_PATH}", token)
     if status in (401, 403):
-        # Stale/expired OAuth token. We deliberately do NOT auto-refresh: the
-        # refresh token may rotate and invalidate the copy Claude Code relies on.
-        # Opening the account lets Claude Code refresh it safely.
+        # Stale/expired OAuth token. cctop never refreshes a token itself (the
+        # refresh token may rotate and invalidate the copy Claude Code relies
+        # on); the monitor reacts to auth_expired by delegating a refresh to
+        # the owner binary, the same thing the R key does.
         return AccountLimits(
-            account, tier, [], "none", None, error=f"token expired - run {account} to refresh"
+            account,
+            tier,
+            [],
+            "none",
+            None,
+            error=f"token expired - run {account} to refresh",
+            auth_expired=True,
         )
     if status == 429 or status is None or (status is not None and status >= 500):
         # Transient: rate limited (429), a server hiccup (5xx), or a network

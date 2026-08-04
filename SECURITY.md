@@ -42,10 +42,13 @@ cctop is read-only except for explicit actions you invoke:
    (`CLAUDE.md`, `settings.json`, `commands/agents/skills/hooks/output-styles`)
    — never credentials, identity (`.claude.json`), or session state. It never
    deletes, overwrites, or edits existing lines.
-2. **Token refresh** (the `R` key): runs `claude mcp list` for an account so the
-   **Claude Code binary itself** renews its own token at startup (a quota-free,
-   non-interactive command). cctop does not write the credential; it delegates
-   to the tool that owns it.
+2. **Token refresh** (automatic near expiry and on a 401, or the `R` key):
+   runs `claude mcp list` for an account so the **Claude Code binary itself**
+   renews its own token at startup (a quota-free, non-interactive command).
+   cctop does not write the credential; it delegates to the tool that owns it.
+   Automatic attempts are bounded (a failed refresh backs off and goes quiet
+   until a real `/login` changes the stored expiry) and can be disabled with
+   `auto_refresh_tokens = false`.
 3. **Session resume** (`Enter` in history search): hands the terminal to
    `claude --resume` / `codex resume` for the selected session, with
    `CLAUDE_CONFIG_DIR` pinned to the session's own account. The search itself

@@ -127,6 +127,10 @@ class AccountLimits:
     # on its own. retry_after is the server's requested wait in seconds, if any.
     retriable: bool = False
     retry_after: float | None = None
+    # True when the failure was specifically an expired/rejected OAuth token
+    # (HTTP 401/403), so the monitor can trigger a delegated refresh without
+    # parsing error strings.
+    auth_expired: bool = False
 
 
 @dataclass(frozen=True)
