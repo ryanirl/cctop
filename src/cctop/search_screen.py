@@ -27,7 +27,7 @@ from textual.widgets import DataTable, Input, Rule, Static
 
 from . import histsearch
 from .app import _fit
-from .cli import _format_age
+from .cli import _format_age, _format_model
 from .collect import Account
 
 TEAL = "#20B2AA"
@@ -36,10 +36,12 @@ MUTED = "grey50"
 
 _DEBOUNCE_SECONDS = 0.25
 _PREVIEW_HITS = 4
-# Fixed column budgets so title never pushes hits/age off-screen; project and
-# title are clipped with an ellipsis instead of forcing a horizontal scroll.
-_PROJECT_WIDTH = 36
-_TITLE_WIDTH = 56
+# Fixed column budgets so title never pushes the trailing columns off-screen;
+# project and title are clipped with an ellipsis instead of forcing a
+# horizontal scroll.
+_PROJECT_WIDTH = 24
+_TITLE_WIDTH = 34
+_MODEL_WIDTH = 10
 
 
 def _highlight(snippet: str, query: str, regex: bool) -> Text:
@@ -135,9 +137,14 @@ class SearchScreen(ModalScreen):
     def on_mount(self) -> None:
         table = self.query_one("#search-results", DataTable)
         table.add_column("acct", key="acct")
+        table.add_column("prov", key="prov")
+        table.add_column("●", key="live")
         table.add_column("project", key="project", width=_PROJECT_WIDTH)
         table.add_column("title", key="title", width=_TITLE_WIDTH)
+        table.add_column("model", key="model", width=_MODEL_WIDTH)
+        table.add_column("turns", key="turns")
         table.add_column("hits", key="hits")
+        table.add_column("start", key="start")
         table.add_column("last", key="last")
 
         search_input = self.query_one("#search-input", Input)
@@ -219,9 +226,14 @@ class SearchScreen(ModalScreen):
         for index, match in enumerate(self._matches):
             table.add_row(
                 Text(match.account, style=TEAL),
+                Text(match.provider, style=MUTED),
+                Text("●", style=TEAL) if match.live else Text(""),
                 Text(_fit(match.project, _PROJECT_WIDTH), style=MUTED),
                 _fit(match.title, _TITLE_WIDTH),
+                Text(_fit(_format_model(match.model), _MODEL_WIDTH), style=MUTED),
+                str(match.turns) if match.turns is not None else "-",
                 str(len(match.hits)),
+                Text(_format_age(match.started, now), style=MUTED),
                 Text(_format_age(match.last_timestamp, now), style=MUTED),
                 key=str(index),
             )

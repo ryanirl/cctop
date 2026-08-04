@@ -23,11 +23,15 @@ def _claude_line(
     role: str = "user",
     timestamp: str = "2026-07-01T12:00:00Z",
     sidechain: bool = False,
+    model: str | None = None,
 ) -> str:
+    message: dict = {"role": role, "content": text}
+    if model is not None:
+        message["model"] = model
     return json.dumps(
         {
             "type": role,
-            "message": {"role": role, "content": text},
+            "message": message,
             "sessionId": session_id,
             "timestamp": timestamp,
             "cwd": "/tmp/project",
@@ -315,6 +319,80 @@ def test_new_terminal_script_pins_account_and_cwd(tmp_path: Path) -> None:
     assert f"cd {tmp_path}" in script
     assert f"export CLAUDE_CONFIG_DIR={tmp_path}/.claude-1" in script
     assert script.rstrip().endswith("exec /usr/local/bin/claude --resume abc")
+
+
+def test_session_metadata_columns(tmp_path: Path) -> None:
+    # model from the matched assistant line, started from the head, turns from
+    # the assistant-line count, provider tag from the account.
+    config_dir = tmp_path / ".claude"
+    project = config_dir / "projects" / "-tmp-project"
+    project.mkdir(parents=True)
+    session = "abcd0000-0000-0000-0000-000000000001"
+    lines = [
+        _claude_line("what about the needle?", session_id=session),
+        _claude_line(
+            "needle answer one",
+            session_id=session,
+            role="assistant",
+            timestamp="2026-07-01T12:01:00Z",
+            model="claude-opus-4-8",
+        ),
+        _claude_line(
+            "closing remark",
+            session_id=session,
+            role="assistant",
+            timestamp="2026-07-01T12:02:00Z",
+            model="claude-opus-4-8",
+        ),
+    ]
+    (project / f"{session}.jsonl").write_text("\n".join(lines) + "\n")
+
+    account = Account("cc-0", config_dir)
+    result = histsearch.search_history("needle", [account], backend=PY_BACKEND)
+
+    match = result.sessions[0]
+    assert match.provider == "claude"
+    assert match.model == "claude-opus-4-8"
+    assert match.turns == 2
+    assert match.started is not None and match.started.hour == 12
+    assert match.live is False
+
+
+def test_live_marker_from_registry(tmp_path: Path) -> None:
+    import os
+
+    config_dir = tmp_path / ".claude"
+    project = config_dir / "projects" / "-tmp-project"
+    project.mkdir(parents=True)
+    registry = config_dir / "sessions"
+    registry.mkdir()
+
+    alive = "abcd0000-0000-0000-0000-000000000002"
+    dead = "abcd0000-0000-0000-0000-000000000003"
+    for session in (alive, dead):
+        (project / f"{session}.jsonl").write_text(_claude_line("needle", session_id=session) + "\n")
+    # This test process's own pid is definitionally alive; 2**30 is not a
+    # plausible pid on macOS.
+    (registry / "1.json").write_text(json.dumps({"pid": os.getpid(), "sessionId": alive}))
+    (registry / "2.json").write_text(json.dumps({"pid": 2**30, "sessionId": dead}))
+
+    account = Account("cc-0", config_dir)
+    result = histsearch.search_history("needle", [account], backend=PY_BACKEND)
+
+    live_by_id = {match.session_id: match.live for match in result.sessions}
+    assert live_by_id == {alive: True, dead: False}
+
+
+def test_codex_model_from_turn_context(tmp_path: Path) -> None:
+    account = _write_codex_account(tmp_path)
+    day = account.config_dir / "sessions" / "2026" / "07" / "01"
+    rollout = next(day.glob("rollout-*.jsonl"))
+    turn_context = json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.3-codex"}})
+    rollout.write_text(rollout.read_text() + turn_context + "\n")
+
+    result = histsearch.search_history("codex needle", [account], backend=PY_BACKEND)
+
+    assert result.sessions[0].model == "gpt-5.3-codex"
 
 
 def test_subagent_transcripts_are_skipped(tmp_path: Path) -> None:

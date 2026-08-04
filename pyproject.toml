@@ -3,7 +3,7 @@ name = "cctop-tui"
 version = "0.2.0"
 description = "A live terminal monitor for multiple Claude Code and OpenAI Codex accounts, in the spirit of nvtop/htop."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Ryan 'RyanIRL' Peters" }]
@@ -25,6 +25,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -61,7 +62,7 @@ packages = ["src/cctop"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py39"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -72,6 +73,8 @@ select = ["E", "F", "I", "UP", "B", "W", "C4"]
 ignore = ["B008", "UP017"]
 
 [tool.mypy]
+# Mypy no longer accepts a 3.9 target; 3.10 is the closest it can check. The
+# 3.9 floor itself is enforced by the real 3.9 run in the CI matrix.
 python_version = "3.10"
 files = ["src/cctop"]
 ignore_missing_imports = true

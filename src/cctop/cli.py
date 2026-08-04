@@ -582,6 +582,10 @@ def _cmd_search(argv: list[str]) -> None:
                     "project": match.project,
                     "session_id": match.session_id,
                     "title": match.title,
+                    "model": match.model,
+                    "live": match.live,
+                    "turns": match.turns,
+                    "started": match.started.isoformat() if match.started else None,
                     "file_path": str(match.path),
                     "line_number": hit.line_number,
                     "role": hit.role,
@@ -604,14 +608,17 @@ def _cmd_search(argv: list[str]) -> None:
     console = Console()
     now = datetime.now(timezone.utc)
     for match in result.sessions:
+        turns = f" · {match.turns} turns" if match.turns is not None else ""
         header = Text.assemble(
             (match.account, "bold #20B2AA"),
-            ("  ", ""),
+            (" ● " if match.live else "  ", "bold #20B2AA"),
+            (f"{match.provider}  ", "grey50"),
             (match.project, "grey50"),
             ("  ", ""),
             (match.title, "default"),
             (
-                f"  {len(match.hits)} match(es) · {_format_age(match.last_timestamp, now)} ago",
+                f"  {_format_model(match.model)}{turns} · {len(match.hits)} match(es) · "
+                f"{_format_age(match.last_timestamp, now)} ago",
                 "grey50",
             ),
         )

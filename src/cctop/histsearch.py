@@ -62,6 +62,14 @@ class SessionMatch:
     cwd: str
     last_timestamp: datetime | None
     hits: list[SearchHit]
+    model: str | None = None
+    started: datetime | None = None
+    # Whether this session is running right now (its process is alive in the
+    # registry), so the UI can mark it before someone resumes it twice.
+    live: bool = False
+    # Assistant-message count: a cheap proxy for conversation depth, from one
+    # ripgrep --count pass over the displayed sessions. None when unknown.
+    turns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -318,16 +326,26 @@ def _skip_as_title(text: str) -> bool:
     return text.startswith(("<", "Caveat:")) or not text.strip()
 
 
-def _head_meta(path: Path, provider: str) -> tuple[str, str]:
-    """(title, cwd) read from the head of a transcript.
+@dataclass
+class HeadMeta:
+    """Session metadata readable from a transcript's first lines."""
 
-    Claude writes an ai-title record and the first user message within the
-    first lines of a session file, so a bounded head read finds a good title
-    without parsing the whole (possibly huge) transcript.
+    title: str = ""
+    cwd: str = ""
+    model: str | None = None
+    started: datetime | None = None
+
+
+def _head_meta(path: Path, provider: str) -> HeadMeta:
+    """Title, cwd, model, and start time from the head of a transcript.
+
+    Claude writes an ai-title record, the first user message, and the first
+    assistant message (which names the model) within the first lines of a
+    session file, so a bounded head read finds all of it without parsing the
+    whole (possibly huge) transcript.
     """
-    title = ""
+    meta = HeadMeta()
     first_user = ""
-    cwd = ""
     try:
         with path.open(encoding="utf-8", errors="replace") as handle:
             consumed = 0
@@ -343,34 +361,126 @@ def _head_meta(path: Path, provider: str) -> tuple[str, str]:
                 if not isinstance(record, dict):
                     continue
 
+                if meta.started is None:
+                    meta.started = _parse_timestamp(record.get("timestamp"))
+
                 if provider == "codex":
+                    payload = record.get("payload") or {}
                     if record.get("type") == "session_meta":
-                        payload = record.get("payload") or {}
-                        cwd = cwd or str(payload.get("cwd") or "")
+                        meta.cwd = meta.cwd or str(payload.get("cwd") or "")
+                    if record.get("type") == "turn_context":
+                        model = payload.get("model")
+                        if isinstance(model, str):
+                            meta.model = meta.model or model
                     parsed = _parse_codex_line(record)
                     if parsed and parsed[0] == "user" and not first_user:
                         first_user = parsed[1]
                     continue
 
                 if isinstance(record.get("aiTitle"), str):
-                    title = record["aiTitle"]
-                if isinstance(record.get("summary"), str) and not title:
-                    title = record["summary"]
-                cwd = cwd or str(record.get("cwd") or "")
+                    meta.title = record["aiTitle"]
+                if isinstance(record.get("summary"), str) and not meta.title:
+                    meta.title = record["summary"]
+                meta.cwd = meta.cwd or str(record.get("cwd") or "")
                 if record.get("type") == "user" and not first_user:
                     text = _message_text(record.get("message") or {})
                     if not _skip_as_title(text):
                         first_user = text
+                if record.get("type") == "assistant" and meta.model is None:
+                    model = (record.get("message") or {}).get("model")
+                    if isinstance(model, str) and not model.startswith("<"):
+                        meta.model = model
     except OSError:
         pass
 
-    chosen = title or first_user
-    return " ".join(chosen.split())[:120], cwd
+    chosen = meta.title or first_user
+    meta.title = " ".join(chosen.split())[:120]
+    return meta
 
 
 def _short_cwd(cwd: str) -> str:
     home = str(Path.home())
     return "~" + cwd[len(home) :] if cwd.startswith(home) else cwd
+
+
+@dataclass
+class _PathMeta:
+    """What one transcript's matched lines have revealed so far."""
+
+    account: Account
+    session_id: str = ""
+    cwd: str = ""
+    model: str | None = None
+
+
+# Codex liveness discovery shells out to ps/lsof (~100ms), far slower than
+# anything else in a search, so its result is reused for a few seconds; the
+# same cadence the monitor uses for Codex polling.
+_CODEX_LIVE_TTL = 5.0
+_codex_live_cache: tuple[float, frozenset[str]] | None = None
+
+
+def _codex_live_ids() -> frozenset[str]:
+    global _codex_live_cache
+    import time
+
+    now = time.monotonic()
+    if _codex_live_cache is not None and now - _codex_live_cache[0] < _CODEX_LIVE_TTL:
+        return _codex_live_cache[1]
+
+    from . import codex
+
+    ids = frozenset(session.session_id for session in codex.discover_sessions())
+    _codex_live_cache = (now, ids)
+    return ids
+
+
+def _live_session_ids(accounts: list[Account], need_codex: bool) -> set[str]:
+    """Session ids with a live process right now, from the registries.
+
+    Claude registries are a handful of small JSON files (cheap, always read);
+    Codex discovery is slower and only runs (cached) when a Codex session is
+    actually going to be displayed.
+    """
+    from .registry import process_alive, read_registry
+
+    live: set[str] = set()
+    for account in accounts:
+        if account.provider == "codex":
+            continue
+        for session in read_registry(account.config_dir):
+            if session.session_id and process_alive(session.pid):
+                live.add(session.session_id)
+
+    if need_codex:
+        live.update(_codex_live_ids())
+    return live
+
+
+# Assistant-message line markers, for the turns count: one line per model
+# response in a Claude transcript, one agent_message event in a Codex rollout.
+_TURN_MARKERS = {
+    "claude": ['"type":"assistant"', '"type": "assistant"'],
+    "codex": ['"agent_message"'],
+}
+
+
+def _count_turns(
+    ordered: list[tuple[Path, list[SearchHit]]],
+    meta_by_path: dict[Path, _PathMeta],
+    backend: ripgrep.Backend | None,
+) -> dict[Path, int]:
+    """Assistant-message counts for just the displayed sessions.
+
+    One ripgrep --count invocation per provider over at most limit_sessions
+    files, so the depth column costs single-digit milliseconds.
+    """
+    counts: dict[Path, int] = {}
+    for provider, markers in _TURN_MARKERS.items():
+        paths = [path for path, _ in ordered if meta_by_path[path].account.provider == provider]
+        if paths:
+            counts.update(ripgrep.count_lines(markers, paths, backend=backend))
+    return counts
 
 
 def _cwd_within(cwd: str, within: Path) -> bool:
@@ -422,7 +532,7 @@ def search_history(
     )
 
     hits_by_path: dict[Path, list[SearchHit]] = {}
-    meta_by_path: dict[Path, tuple[Account, str, str]] = {}  # account, session_id, cwd
+    meta_by_path: dict[Path, _PathMeta] = {}
     for match in raw:
         account = _account_for(match.path, roots)
         if account is None:
@@ -445,23 +555,25 @@ def search_history(
 
         hit = SearchHit(match.path, match.line_number, role, _snippet(text, span), timestamp)
         hits_by_path.setdefault(match.path, []).append(hit)
-        previous = meta_by_path.get(match.path)
-        meta_by_path[match.path] = (
-            account,
-            session_id or (previous[1] if previous else ""),
-            cwd or (previous[2] if previous else ""),
-        )
+        meta = meta_by_path.setdefault(match.path, _PathMeta(account))
+        meta.session_id = meta.session_id or session_id
+        meta.cwd = meta.cwd or cwd
+        if account.provider != "codex" and meta.model is None:
+            # The matched line already names the model on assistant records, so
+            # most sessions get their model column with no extra read.
+            model = (record.get("message") or {}).get("model")
+            if isinstance(model, str) and not model.startswith("<"):
+                meta.model = model
 
     if within is not None:
         within = within.expanduser().absolute()
         filtered: dict[Path, list[SearchHit]] = {}
         for path, hits in hits_by_path.items():
-            account, session_id, cwd = meta_by_path[path]
-            if not cwd:
+            meta = meta_by_path[path]
+            if not meta.cwd:
                 # Codex lines carry no cwd; read it from the rollout head.
-                _, cwd = _head_meta(path, account.provider)
-                meta_by_path[path] = (account, session_id, cwd)
-            if _cwd_within(cwd, within):
+                meta.cwd = _head_meta(path, meta.account.provider).cwd
+            if _cwd_within(meta.cwd, within):
                 filtered[path] = hits
         hits_by_path = filtered
 
@@ -481,12 +593,17 @@ def search_history(
     if len(ordered) > limit_sessions:
         ordered, truncated = ordered[:limit_sessions], True
 
+    need_codex = any(meta_by_path[path].account.provider == "codex" for path, _ in ordered)
+    live_ids = _live_session_ids(accounts, need_codex) if ordered else set()
+    turns_by_path = _count_turns(ordered, meta_by_path, backend)
+
     sessions = []
     for path, hits in ordered:
-        account, session_id, cwd = meta_by_path[path]
-        title, head_cwd = _head_meta(path, account.provider)
-        cwd = cwd or head_cwd
-        if account.provider == "codex":
+        meta = meta_by_path[path]
+        head = _head_meta(path, meta.account.provider)
+        cwd = meta.cwd or head.cwd
+        session_id = meta.session_id
+        if meta.account.provider == "codex":
             session_id = session_id or _codex_session_id(path)
         session_id = session_id or path.stem
 
@@ -494,13 +611,17 @@ def search_history(
             SessionMatch(
                 session_id=session_id,
                 path=path,
-                account=account.name,
-                provider=account.provider,
+                account=meta.account.name,
+                provider=meta.account.provider,
                 project=_short_cwd(cwd) if cwd else _slug_project(path),
-                title=title or session_id[:8],
+                title=head.title or session_id[:8],
                 cwd=cwd,
                 last_timestamp=last_timestamp(hits),
                 hits=hits,
+                model=meta.model or head.model,
+                started=head.started,
+                live=session_id in live_ids,
+                turns=turns_by_path.get(path),
             )
         )
 

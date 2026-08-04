@@ -212,6 +212,57 @@ def _run_python_scan(
     return matches, False
 
 
+def count_lines(
+    markers: list[str],
+    files: list[Path],
+    backend: Backend | None = None,
+) -> dict[Path, int]:
+    """Per-file count of lines containing any marker (fixed strings).
+
+    One ripgrep --count invocation over an explicit file list; used to price a
+    "conversation depth" column at milliseconds instead of a full parse. The
+    Python fallback reads the files directly.
+    """
+    if not files:
+        return {}
+    backend = backend or find_backend()
+
+    if backend.name == "python":
+        counts: dict[Path, int] = {}
+        for path in files:
+            try:
+                with path.open(encoding="utf-8", errors="replace") as handle:
+                    counts[path] = sum(
+                        1 for line in handle if any(marker in line for marker in markers)
+                    )
+            except OSError:
+                continue
+        return counts
+
+    argv = [*backend.argv, "--count", "--with-filename", "--no-config", "--no-messages"]
+    argv += ["--fixed-strings"]
+    for marker in markers:
+        argv += ["-e", marker]
+    argv += [str(path) for path in files]
+    try:
+        result = subprocess.run(
+            argv,
+            executable=backend.executable,
+            capture_output=True,
+            text=True,
+            timeout=_SEARCH_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    counts = {}
+    for line in result.stdout.splitlines():
+        path_text, separator, count_text = line.rpartition(":")
+        if separator and count_text.isdigit():
+            counts[Path(path_text)] = int(count_text)
+    return counts
+
+
 def search_lines(
     query: str,
     roots: list[Path],
