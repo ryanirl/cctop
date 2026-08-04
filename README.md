@@ -18,7 +18,10 @@ your credentials only to make those reads, never logs or transmits a token, and
 is read-only except for two explicit, additive account actions. See
 [SECURITY.md](SECURITY.md) for the full trust statement.
 
-![cctop](https://raw.githubusercontent.com/ryanirl/cctop/main/docs/hero.png)
+![cctop](https://raw.githubusercontent.com/ryanirl/cctop/main/docs/demo-dashboard.png)
+
+*(Screenshots show generated demo data; `scripts/demo_screenshots.py` rebuilds
+them from a fabricated fleet, so they contain nothing real.)*
 
 ## What it shows
 
@@ -77,6 +80,8 @@ account · `s` stats · `,` settings · `q` quit. The footer shows a live countd
 to the next auto refresh; `r` refreshes immediately and resets it.
 
 ### History search (`/`, `cctop search`)
+
+![cctop search](https://raw.githubusercontent.com/ryanirl/cctop/main/docs/demo-search.png)
 
 Search every conversation you have ever had, across all accounts and both
 providers, live as you type. Results are grouped by session and show the

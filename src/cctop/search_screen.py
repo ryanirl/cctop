@@ -160,7 +160,7 @@ class SearchScreen(ModalScreen):
             with Container(id="path-bar") as bar:
                 bar.border_title = "PATH"
                 yield Input(
-                    placeholder="filter by path (e.g. cctop, ~/master/interp)...",
+                    placeholder="filter by path (e.g. api-server, ~/work)...",
                     id="path-input",
                 )
             with Container(id="results-box") as box:
