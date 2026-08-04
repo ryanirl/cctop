@@ -541,6 +541,12 @@ def _cmd_search(argv: list[str]) -> None:
         metavar="PATH",
         help="Only sessions whose working directory is under PATH.",
     )
+    parser.add_argument(
+        "--path",
+        default=None,
+        metavar="TEXT",
+        help="Only sessions whose path/cwd contains TEXT (looser than --dir).",
+    )
     parser.add_argument("--limit", type=int, default=20, help="Max sessions shown (default 20).")
     parser.add_argument("--json", action="store_true", help="Emit JSONL match/summary rows.")
     args = parser.parse_args(argv)
@@ -557,6 +563,7 @@ def _cmd_search(argv: list[str]) -> None:
             initial_query=args.query,
             regex=args.regex,
             within=args.dir,
+            path_filter=args.path or "",
         ).run()
         return
 
@@ -570,6 +577,7 @@ def _cmd_search(argv: list[str]) -> None:
         regex=args.regex,
         limit_sessions=max(1, args.limit),
         within=args.dir,
+        path_filter=args.path,
     )
 
     if args.json:

@@ -63,24 +63,34 @@ class SearchScreen(ModalScreen):
 
     CSS = f"""
     SearchScreen {{ align: center middle; }}
-    #search-box {{
-        border: round {TEAL};
-        border-title-color: {TEAL};
+    #search-layout {{
         width: 90%;
         height: 90%;
-        padding: 0 1;
         background: $background;
     }}
-    #search-input {{ border: none; height: 1; padding: 0; background: transparent; }}
+    #search-bar, #path-bar {{
+        border: round {TEAL};
+        border-title-color: {TEAL};
+        height: 3;
+        padding: 0 1;
+    }}
+    #path-bar {{ border: round {TEAL} 45%; border-title-color: {TEAL}; }}
+    #search-layout Input {{ border: none; height: 1; padding: 0; background: transparent; }}
+    #results-box {{
+        border: round {TEAL};
+        border-title-color: {TEAL};
+        height: 1fr;
+        padding: 0 1;
+    }}
     #search-status {{ height: 1; color: #808080; }}
     #search-results {{ height: 1fr; background: transparent; }}
     #search-results > .datatable--header {{
         color: {TEAL}; text-style: bold; background: transparent;
     }}
     #search-results > .datatable--cursor {{ background: {TEAL} 25%; }}
-    #search-box Rule {{ color: {TEAL} 30%; margin: 0; height: 1; }}
+    #results-box Rule {{ color: {TEAL} 30%; margin: 0; height: 1; }}
     #search-preview {{ height: auto; max-height: 12; }}
-    #search-hint {{ height: 1; color: #808080; }}
+    #search-hint {{ height: 1; color: #808080; padding: 0 1; }}
     """
 
     # Up/down and enter are screen bindings (not table focus) so the results
@@ -102,11 +112,13 @@ class SearchScreen(ModalScreen):
         initial_query: str = "",
         regex: bool = False,
         within: Path | None = None,
+        path_filter: str = "",
         standalone: bool = False,
     ) -> None:
         super().__init__()
         self._accounts = accounts
         self._initial_query = initial_query
+        self._initial_path = path_filter
         self._regex = regex
         # The directory scope: None searches everywhere. ctrl+d toggles it back
         # and forth against the default (--dir when given, else the directory
@@ -119,16 +131,26 @@ class SearchScreen(ModalScreen):
         self._matches: list[histsearch.SessionMatch] = []
 
     def compose(self) -> ComposeResult:
-        with Container(id="search-box") as box:
-            box.border_title = "SEARCH"
-            yield Input(placeholder="search all history...", id="search-input")
-            yield Static(id="search-status")
-            yield DataTable(id="search-results", cursor_type="row")
-            yield Rule(line_style="dashed")
-            yield Static(id="search-preview")
+        with Container(id="search-layout"):
+            with Container(id="search-bar") as bar:
+                bar.border_title = "SEARCH"
+                yield Input(placeholder="search all history...", id="search-input")
+            with Container(id="path-bar") as bar:
+                bar.border_title = "PATH"
+                yield Input(
+                    placeholder="filter by path (e.g. cctop, ~/master/interp)...",
+                    id="path-input",
+                )
+            with Container(id="results-box") as box:
+                box.border_title = "RESULTS"
+                yield Static(id="search-status")
+                yield DataTable(id="search-results", cursor_type="row")
+                yield Rule(line_style="dashed")
+                yield Static(id="search-preview")
             yield Static(
                 Text(
-                    "enter view transcript · ctrl+r regex · ctrl+d this dir · esc close",
+                    "enter view transcript · tab path filter · ctrl+r regex · "
+                    "ctrl+d this dir · esc close",
                     style=MUTED,
                 ),
                 id="search-hint",
@@ -150,6 +172,8 @@ class SearchScreen(ModalScreen):
         search_input = self.query_one("#search-input", Input)
         search_input.focus()
         self._set_status(Text("type to search every account's history", style=MUTED))
+        if self._initial_path:
+            self.query_one("#path-input", Input).value = self._initial_path
         if self._initial_query:
             # Setting the value fires Input.Changed, which debounces into the
             # first search, so a query passed on the CLI behaves exactly as if
@@ -179,29 +203,48 @@ class SearchScreen(ModalScreen):
         table.move_cursor(row=row, animate=False)
         self._render_preview()
 
+    def _inputs(self) -> tuple[str, str]:
+        return (
+            self.query_one("#search-input", Input).value,
+            self.query_one("#path-input", Input).value,
+        )
+
     def _start_search(self) -> None:
-        query = self.query_one("#search-input", Input).value
+        query, path_filter = self._inputs()
         if len(query.strip()) < 2:
-            self._apply_result(query, None, 0.0)
+            self._apply_result(query, path_filter, None, 0.0)
             return
-        self._run_search(query, self._regex, self._within)
+        self._run_search(query, path_filter, self._regex, self._within)
 
     @work(thread=True, exclusive=True, group="history-search")
-    def _run_search(self, query: str, regex: bool, within: Path | None) -> None:
+    def _run_search(
+        self,
+        query: str,
+        path_filter: str,
+        regex: bool,
+        within: Path | None,
+    ) -> None:
         started = time.monotonic()
-        result = histsearch.search_history(query, self._accounts, regex=regex, within=within)
+        result = histsearch.search_history(
+            query,
+            self._accounts,
+            regex=regex,
+            within=within,
+            path_filter=path_filter or None,
+        )
         elapsed = time.monotonic() - started
-        self.app.call_from_thread(self._apply_result, query, result, elapsed)
+        self.app.call_from_thread(self._apply_result, query, path_filter, result, elapsed)
 
     def _apply_result(
         self,
         query: str,
+        path_filter: str,
         result: histsearch.SearchResult | None,
         elapsed: float,
     ) -> None:
-        # A slower search for an older query must never overwrite the current
-        # one: only apply when the input still shows the query that ran.
-        if query != self.query_one("#search-input", Input).value:
+        # A slower search for older inputs must never overwrite the current
+        # ones: only apply when both bars still show what was searched.
+        if (query, path_filter) != self._inputs():
             return
         self._result = result
         self._matches = result.sessions if result else []
@@ -325,12 +368,14 @@ class SearchApp(App):
         initial_query: str = "",
         regex: bool = False,
         within: Path | None = None,
+        path_filter: str = "",
     ) -> None:
         super().__init__()
         self._accounts = accounts
         self._initial_query = initial_query
         self._regex = regex
         self._within = within
+        self._path_filter = path_filter
 
     def on_mount(self) -> None:
         self.push_screen(
@@ -339,6 +384,7 @@ class SearchApp(App):
                 initial_query=self._initial_query,
                 regex=self._regex,
                 within=self._within,
+                path_filter=self._path_filter,
                 standalone=True,
             )
         )

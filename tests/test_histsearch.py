@@ -321,6 +321,44 @@ def test_new_terminal_script_pins_account_and_cwd(tmp_path: Path) -> None:
     assert script.rstrip().endswith("exec /usr/local/bin/claude --resume abc")
 
 
+def test_path_filter_matches_cwd_substring(tmp_path: Path) -> None:
+    account = _write_claude_account(
+        tmp_path, "pf", "needle text", "abcd0000-0000-0000-0000-000000000010"
+    )
+
+    hit = histsearch.search_history("needle", [account], path_filter="Project", backend=PY_BACKEND)
+    miss = histsearch.search_history(
+        "needle", [account], path_filter="unrelated-repo", backend=PY_BACKEND
+    )
+
+    assert len(hit.sessions) == 1  # case-insensitive substring of /tmp/project
+    assert miss.sessions == []
+
+
+def test_path_filter_combines_with_dir_scope(tmp_path: Path) -> None:
+    account = _write_claude_account(
+        tmp_path, "pfd", "needle text", "abcd0000-0000-0000-0000-000000000011"
+    )
+
+    both = histsearch.search_history(
+        "needle",
+        [account],
+        within=Path("/tmp"),
+        path_filter="project",
+        backend=PY_BACKEND,
+    )
+    conflicting = histsearch.search_history(
+        "needle",
+        [account],
+        within=Path("/tmp"),
+        path_filter="elsewhere",
+        backend=PY_BACKEND,
+    )
+
+    assert len(both.sessions) == 1
+    assert conflicting.sessions == []
+
+
 def test_session_metadata_columns(tmp_path: Path) -> None:
     # model from the matched assistant line, started from the head, turns from
     # the assistant-line count, provider tag from the account.

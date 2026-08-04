@@ -83,8 +83,11 @@ providers, live as you type. Results are grouped by session and show the
 owning account, the provider, a live marker (`●` when that session's process
 is running right now), the project, a title from the session's own metadata,
 the model, a turns count, and start/last-activity times; the preview pane
-shows the matching messages highlighted. `Ctrl+R` toggles regex mode; `Ctrl+D`
-scopes the search to the directory you launched from (or pass `--dir PATH`).
+shows the matching messages highlighted. A second bar (`Tab`) filters by path:
+type any fragment of a project path (`cctop`, `~/master/interp`) to narrow the
+results to matching sessions (`--path TEXT` on the CLI). `Ctrl+R` toggles
+regex mode; `Ctrl+D` scopes to the exact directory you launched from (or pass
+`--dir PATH`).
 
 Press `Enter` to open the **transcript viewer**: read the conversation (tool
 noise hidden, matches highlighted, starting at the first match) to make sure

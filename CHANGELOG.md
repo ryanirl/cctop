@@ -31,6 +31,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaving cctop running.
 - Directory scoping: `--dir PATH` (CLI) or `Ctrl+D` (TUI, toggles the launch
   directory) restricts results to sessions whose working directory is under it.
+- A dedicated PATH bar under the search bar (`Tab` to reach it; `--path TEXT`
+  on the CLI): a case-insensitive substring filter on the session's cwd or
+  transcript path, live like the query and combinable with `Ctrl+D`.
 - `cctop search` with no query opens the search TUI; with a query it opens
   pre-filled. `--json` or piped stdout prints instead, as before.
 - Richer search results: an explicit provider column, a live marker (a teal

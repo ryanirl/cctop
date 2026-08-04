@@ -507,6 +507,7 @@ def search_history(
     per_file_cap: int = 20,
     max_hits: int = 500,
     within: Path | None = None,
+    path_filter: str | None = None,
     backend: ripgrep.Backend | None = None,
 ) -> SearchResult:
     """Search every account's transcripts and group the hits by session.
@@ -514,7 +515,8 @@ def search_history(
     Sessions are ordered by their most recent matching message, newest first,
     which is the "which conversation was that" ordering a history search wants.
     `within` restricts results to sessions whose working directory is that
-    directory or below it.
+    directory or below it; `path_filter` is a looser case-insensitive substring
+    match against the session's cwd or transcript path (`~` is expanded).
     """
     query = query.strip()
     if len(query) < 2:
@@ -565,16 +567,23 @@ def search_history(
             if isinstance(model, str) and not model.startswith("<"):
                 meta.model = model
 
-    if within is not None:
-        within = within.expanduser().absolute()
+    needle = ""
+    if path_filter and path_filter.strip():
+        needle = str(Path(path_filter.strip()).expanduser()).casefold()
+    if within is not None or needle:
+        if within is not None:
+            within = within.expanduser().absolute()
         filtered: dict[Path, list[SearchHit]] = {}
         for path, hits in hits_by_path.items():
             meta = meta_by_path[path]
             if not meta.cwd:
                 # Codex lines carry no cwd; read it from the rollout head.
                 meta.cwd = _head_meta(path, meta.account.provider).cwd
-            if _cwd_within(meta.cwd, within):
-                filtered[path] = hits
+            if within is not None and not _cwd_within(meta.cwd, within):
+                continue
+            if needle and needle not in meta.cwd.casefold() and needle not in str(path).casefold():
+                continue
+            filtered[path] = hits
         hits_by_path = filtered
 
     # Sort and cut BEFORE reading transcript heads for titles, so the per-file
