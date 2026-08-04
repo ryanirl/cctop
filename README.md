@@ -100,7 +100,9 @@ the session's working directory and hands off to `claude --resume` /
 
 With an **empty search bar the screen is a session browser**: it opens on your
 recent sessions across every account, newest first, and the PATH bar alone
-narrows them ("what ran in this repo"), with `Enter` reading any of them.
+narrows them ("what ran in this repo"). Browse and search behave identically;
+a query just adds match counts and snippets. No result is selected while you
+type: press `Down` (or click) to select a session, then `Enter` to read it.
 
 `cctop search` on its own opens the same search TUI standalone;
 `cctop search "query"` opens it with the query already entered. With `--json`

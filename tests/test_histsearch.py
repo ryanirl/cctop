@@ -165,17 +165,27 @@ def test_regex_search(tmp_path: Path) -> None:
 
 
 def test_sessions_sort_newest_first_and_limit_marks_truncated(tmp_path: Path) -> None:
+    import os
+
     config_dir = tmp_path / ".claude"
     project = config_dir / "projects" / "-tmp-project"
     project.mkdir(parents=True)
-    for index, stamp in enumerate(["2026-07-01T12:00:00Z", "2026-07-02T12:00:00Z"]):
-        session = f"eeee5555-0000-0000-0000-00000000000{index}"
-        (project / f"{session}.jsonl").write_text(
-            _claude_line("needle", session_id=session, timestamp=stamp) + "\n"
-        )
+    # Search results order by session last-activity (file mtime), the same
+    # ordering the browse listing uses; set explicit mtimes to make it
+    # deterministic. The older stamp goes on the file written LAST so the test
+    # would catch accidental write-order sorting.
+    sessions = [
+        ("eeee5555-0000-0000-0000-000000000000", 2_000_000_000),
+        ("eeee5555-0000-0000-0000-000000000001", 1_000_000_000),
+    ]
+    for session, mtime in sessions:
+        path = project / f"{session}.jsonl"
+        path.write_text(_claude_line("needle", session_id=session) + "\n")
+        os.utime(path, (mtime, mtime))
 
     account = Account("cc-0", config_dir)
     result = histsearch.search_history("needle", [account], backend=PY_BACKEND)
+    assert [match.session_id for match in result.sessions] == [name for name, _ in sessions]
     stamps = [match.last_timestamp for match in result.sessions]
     assert stamps == sorted(stamps, reverse=True)
 
@@ -373,7 +383,7 @@ def test_list_sessions_browses_newest_first(tmp_path: Path) -> None:
 
     result = histsearch.list_sessions([account, newer], backend=PY_BACKEND)
 
-    assert result.mode == "browse"
+    assert result.total_hits == 0
     assert [match.account for match in result.sessions] == ["cc-new", "cc-old"]
     assert all(match.hits == [] for match in result.sessions)
     assert result.sessions[0].title == "new title"

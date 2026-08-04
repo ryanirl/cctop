@@ -60,6 +60,8 @@ class SessionMatch:
     project: str  # short cwd, or the path slug when no cwd was recorded
     title: str
     cwd: str
+    # The session's last activity (transcript mtime); also the sort key, so
+    # search results and the browse listing order and read identically.
     last_timestamp: datetime | None
     hits: list[SearchHit]
     model: str | None = None
@@ -76,15 +78,14 @@ class SessionMatch:
 class SearchResult:
     """The outcome of one search: grouped sessions plus honesty metadata.
 
-    `mode` is "search" for query matches or "browse" for the no-query recent
-    listing, so the UI can label the result set honestly.
+    A query-less browse and a query search return the same shape (browse is
+    just "no hits per session"), so the UI renders both through one path.
     """
 
     sessions: list[SessionMatch]
     total_hits: int
     truncated: bool
     backend: str
-    mode: str = "search"
 
 
 @dataclass(frozen=True)
@@ -591,26 +592,33 @@ def search_history(
             filtered[path] = hits
         hits_by_path = filtered
 
-    # Sort and cut BEFORE reading transcript heads for titles, so the per-file
+    # Sort by session last-activity (mtime), the same ordering browse uses,
+    # and cut BEFORE reading transcript heads for titles, so the per-file
     # metadata read happens only for the sessions that will actually be shown.
+    last_by_path = _mtimes(list(hits_by_path))
     epoch = datetime.min.replace(tzinfo=timezone.utc)
-
-    def last_timestamp(hits: list[SearchHit]) -> datetime | None:
-        stamps = [hit.timestamp for hit in hits if hit.timestamp is not None]
-        return max(stamps) if stamps else None
-
     ordered = sorted(
         hits_by_path.items(),
-        key=lambda item: last_timestamp(item[1]) or epoch,
+        key=lambda item: last_by_path.get(item[0]) or epoch,
         reverse=True,
     )
     if len(ordered) > limit_sessions:
         ordered, truncated = ordered[:limit_sessions], True
 
-    sessions = _build_matches(ordered, meta_by_path, accounts, backend, {})
+    sessions = _build_matches(ordered, meta_by_path, accounts, backend, last_by_path)
 
     total_hits = sum(len(session.hits) for session in sessions)
     return SearchResult(sessions, total_hits, truncated, backend_name)
+
+
+def _mtimes(paths: list[Path]) -> dict[Path, datetime | None]:
+    stamps: dict[Path, datetime | None] = {}
+    for path in paths:
+        try:
+            stamps[path] = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            stamps[path] = None
+    return stamps
 
 
 def _build_matches(
@@ -622,9 +630,8 @@ def _build_matches(
 ) -> list[SessionMatch]:
     """Displayed sessions from an already sorted-and-limited path list.
 
-    Shared by search (hits carry the last timestamp) and browse (the file
-    mtime, passed via `last_by_path`, stands in). Everything per-file here
-    (head read, turns count, liveness) runs only for sessions actually shown.
+    Shared by search and browse. Everything per-file here (head read, turns
+    count, liveness) runs only for sessions actually shown.
     """
     need_codex = any(meta_by_path[path].account.provider == "codex" for path, _ in ordered)
     live_ids = _live_session_ids(accounts, need_codex) if ordered else set()
@@ -640,7 +647,6 @@ def _build_matches(
             session_id = session_id or _codex_session_id(path)
         session_id = session_id or path.stem
 
-        stamps = [hit.timestamp for hit in hits if hit.timestamp is not None]
         sessions.append(
             SessionMatch(
                 session_id=session_id,
@@ -650,7 +656,7 @@ def _build_matches(
                 project=_short_cwd(cwd) if cwd else _slug_project(path),
                 title=head.title or session_id[:8],
                 cwd=cwd,
-                last_timestamp=max(stamps) if stamps else last_by_path.get(path),
+                last_timestamp=last_by_path.get(path),
                 hits=hits,
                 model=meta.model or head.model,
                 started=head.started,
@@ -735,7 +741,7 @@ def list_sessions(
 
     backend_name = (backend or ripgrep.find_backend()).name
     sessions = _build_matches(ordered, meta_by_path, accounts, backend, last_by_path)
-    return SearchResult(sessions, 0, truncated, backend_name, mode="browse")
+    return SearchResult(sessions, 0, truncated, backend_name)
 
 
 def resume_plan(match: SessionMatch, accounts: list[Account]) -> ResumePlan | None:

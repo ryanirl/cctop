@@ -35,11 +35,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the CLI): a case-insensitive substring filter on the session's cwd or
   transcript path, live like the query and combinable with `Ctrl+D`.
 - Browse mode: with an empty search bar the screen lists recent sessions
-  across every account (newest first by file mtime), so it opens as a session
-  browser and the PATH bar alone answers "what ran in this repo". The preview
-  shows the session's card; `Enter` reads its transcript. On the CLI, a
-  query-less `cctop search` with `--json`/piped output lists sessions the
-  same way.
+  across every account, so it opens as a session browser and the PATH bar
+  alone answers "what ran in this repo". Browse and search are one rendering
+  path with identical semantics: sessions always sort by last activity (file
+  mtime), the preview always shows the session card (plus highlighted
+  snippets when a query matched), and browse is simply "no hits". On the CLI,
+  a query-less `cctop search` with `--json`/piped output lists sessions as
+  `{"type": "session", ...}` rows.
+- One cursor: while typing in the SEARCH or PATH bar no result row is
+  selected, so `Enter` in a bar never opens a session by accident. `Down` (or
+  a click) selects; `Up` past the first row returns to the bar; new results
+  always start unselected.
 - `cctop search` with no query opens the search TUI; with a query it opens
   pre-filled. `--json` or piped stdout prints instead, as before.
 - Richer search results: an explicit provider column, a live marker (a teal

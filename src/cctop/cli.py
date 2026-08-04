@@ -656,10 +656,10 @@ def _cmd_search(argv: list[str]) -> None:
             "[grey50]No matches.[/grey50]" if args.query else "[grey50]No sessions.[/grey50]"
         )
         return
-    if result.mode == "browse":
-        tail = f"{len(result.sessions)} recent sessions · {result.backend}"
-    else:
-        tail = f"{len(result.sessions)} sessions · {result.total_hits} matches · {result.backend}"
+    tail = f"{len(result.sessions)} sessions"
+    if result.total_hits:
+        tail += f" · {result.total_hits} matches"
+    tail += f" · {result.backend}"
     if result.truncated:
         tail += " · truncated (raise --limit or narrow the query)"
     console.print(f"[grey50]{tail}[/grey50]")

@@ -88,6 +88,7 @@ class SearchScreen(ModalScreen):
         color: {TEAL}; text-style: bold; background: transparent;
     }}
     #search-results > .datatable--cursor {{ background: {TEAL} 25%; }}
+    #search-results.unselected > .datatable--cursor {{ background: transparent; }}
     #results-box Rule {{ color: {TEAL} 30%; margin: 0; height: 1; }}
     #search-preview {{ height: auto; max-height: 12; }}
     #search-hint {{ height: 1; color: #808080; padding: 0 1; }}
@@ -129,6 +130,10 @@ class SearchScreen(ModalScreen):
         self._timer: Timer | None = None
         self._result: histsearch.SearchResult | None = None
         self._matches: list[histsearch.SessionMatch] = []
+        # One cursor: while typing in a bar no row is selected, so enter never
+        # opens a session by accident. Down (or a click) selects; up past the
+        # first row returns to the bar-only state.
+        self._row_selected = False
 
     def compose(self) -> ComposeResult:
         with Container(id="search-layout"):
@@ -149,8 +154,8 @@ class SearchScreen(ModalScreen):
                 yield Static(id="search-preview")
             yield Static(
                 Text(
-                    "enter view transcript · tab path filter · ctrl+r regex · "
-                    "ctrl+d this dir · esc close",
+                    "down select · enter view transcript · tab path filter · "
+                    "ctrl+r regex · ctrl+d this dir · esc close",
                     style=MUTED,
                 ),
                 id="search-hint",
@@ -198,12 +203,28 @@ class SearchScreen(ModalScreen):
         self._within = None if self._within is not None else self._within_default
         self._start_search()
 
+    def _set_row_selected(self, selected: bool) -> None:
+        self._row_selected = selected
+        self.query_one("#search-results", DataTable).set_class(not selected, "unselected")
+
     def action_move_cursor(self, delta: int) -> None:
         table = self.query_one("#search-results", DataTable)
         if table.row_count == 0:
             return
-        row = max(0, min(table.row_count - 1, (table.cursor_row or 0) + delta))
-        table.move_cursor(row=row, animate=False)
+
+        if not self._row_selected:
+            if delta > 0:
+                self._set_row_selected(True)
+                table.move_cursor(row=0, animate=False)
+                self._render_preview()
+            return
+
+        row = (table.cursor_row or 0) + delta
+        if row < 0:
+            self._set_row_selected(False)
+            self._render_preview()
+            return
+        table.move_cursor(row=min(table.row_count - 1, row), animate=False)
         self._render_preview()
 
     def _inputs(self) -> tuple[str, str]:
@@ -268,6 +289,9 @@ class SearchScreen(ModalScreen):
     def _render_results(self, query: str, elapsed: float) -> None:
         table = self.query_one("#search-results", DataTable)
         table.clear()
+        # Fresh results always start unselected, so a stale selection can
+        # never be opened by an enter meant for the input bar.
+        self._set_row_selected(False)
 
         result = self._result
         if result is None:
@@ -292,13 +316,9 @@ class SearchScreen(ModalScreen):
             )
 
         status = Text()
-        if result.mode == "browse":
-            status.append(f"{len(result.sessions)} recent sessions", style="default")
-        else:
-            status.append(
-                f"{len(result.sessions)} sessions · {result.total_hits} matches",
-                style="default",
-            )
+        status.append(f"{len(result.sessions)} sessions", style="default")
+        if result.total_hits:
+            status.append(f" · {result.total_hits} matches", style="default")
         status.append(f" · {result.backend} · {elapsed * 1000:.0f}ms", style=MUTED)
         if result.truncated:
             status.append(" · truncated", style=MUTED)
@@ -321,17 +341,14 @@ class SearchScreen(ModalScreen):
         query = query if query is not None else self.query_one("#search-input", Input).value
 
         now = datetime.now(timezone.utc)
-        if not match.hits:
-            # Browse mode: no matched snippets, so show the session's card.
-            info = Text()
-            info.append(match.title, style=f"bold {TEAL}")
-            info.append(f"\n{match.cwd or match.project}", style=MUTED)
-            info.append(f"\nsession {match.session_id}", style=MUTED)
-            info.append("\nenter to read the transcript", style=MUTED)
-            widget.update(info)
-            return
+        card = Text()
+        card.append(match.title, style=f"bold {TEAL}")
+        card.append(
+            f"   {match.cwd or match.project} · session {match.session_id}",
+            style=MUTED,
+        )
 
-        lines: list = []
+        lines: list = [card]
         for hit in match.hits[:_PREVIEW_HITS]:
             header = Text()
             header.append(hit.role, style=TEAL if hit.role == "user" else "default")
@@ -344,22 +361,29 @@ class SearchScreen(ModalScreen):
         widget.update(Group(*lines))
 
     def _selected_match(self) -> histsearch.SessionMatch | None:
-        table = self.query_one("#search-results", DataTable)
-        if not self._matches or table.cursor_row is None or table.cursor_row < 0:
+        if not self._row_selected or not self._matches:
             return None
-        if table.cursor_row >= len(self._matches):
+        table = self.query_one("#search-results", DataTable)
+        if table.cursor_row is None or not 0 <= table.cursor_row < len(self._matches):
             return None
         return self._matches[table.cursor_row]
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        self._render_preview()
+        # The cursor also moves programmatically (table rebuilds); only a real
+        # selection should drive the preview.
+        if self._row_selected:
+            self._render_preview()
 
     # -- open the transcript viewer --------------------------------------------
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._open_viewer()
+        # Enter in a bar opens nothing unless a row was explicitly selected.
+        if self._row_selected:
+            self._open_viewer()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # A click is an explicit selection: select the row and open it.
+        self._set_row_selected(True)
         self._open_viewer()
 
     def _open_viewer(self) -> None:
