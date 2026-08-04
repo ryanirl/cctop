@@ -567,34 +567,48 @@ def _cmd_search(argv: list[str]) -> None:
         ).run()
         return
 
-    if not args.query:
-        Console().print("[red]a query is required with --json or piped output[/red]")
-        return
-
-    result = histsearch.search_history(
-        args.query,
-        accounts,
-        regex=args.regex,
-        limit_sessions=max(1, args.limit),
-        within=args.dir,
-        path_filter=args.path,
-    )
+    if args.query:
+        result = histsearch.search_history(
+            args.query,
+            accounts,
+            regex=args.regex,
+            limit_sessions=max(1, args.limit),
+            within=args.dir,
+            path_filter=args.path,
+        )
+    else:
+        # No query: list recent sessions instead (still honoring the filters),
+        # so `cctop search --json --path repo` doubles as a session lister.
+        result = histsearch.list_sessions(
+            accounts,
+            limit_sessions=max(1, args.limit),
+            within=args.dir,
+            path_filter=args.path,
+        )
 
     if args.json:
         for match in result.sessions:
+            session_fields = {
+                "account": match.account,
+                "provider": match.provider,
+                "project": match.project,
+                "session_id": match.session_id,
+                "title": match.title,
+                "model": match.model,
+                "live": match.live,
+                "turns": match.turns,
+                "started": match.started.isoformat() if match.started else None,
+                "last_activity": (
+                    match.last_timestamp.isoformat() if match.last_timestamp else None
+                ),
+                "file_path": str(match.path),
+            }
+            if not match.hits:
+                print(json.dumps({"type": "session", **session_fields}))
             for hit in match.hits:
                 row = {
                     "type": "match",
-                    "account": match.account,
-                    "provider": match.provider,
-                    "project": match.project,
-                    "session_id": match.session_id,
-                    "title": match.title,
-                    "model": match.model,
-                    "live": match.live,
-                    "turns": match.turns,
-                    "started": match.started.isoformat() if match.started else None,
-                    "file_path": str(match.path),
+                    **session_fields,
                     "line_number": hit.line_number,
                     "role": hit.role,
                     "timestamp": hit.timestamp.isoformat() if hit.timestamp else None,
@@ -617,6 +631,7 @@ def _cmd_search(argv: list[str]) -> None:
     now = datetime.now(timezone.utc)
     for match in result.sessions:
         turns = f" · {match.turns} turns" if match.turns is not None else ""
+        matches = f" · {len(match.hits)} match(es)" if match.hits else ""
         header = Text.assemble(
             (match.account, "bold #20B2AA"),
             (" ● " if match.live else "  ", "bold #20B2AA"),
@@ -625,7 +640,7 @@ def _cmd_search(argv: list[str]) -> None:
             ("  ", ""),
             (match.title, "default"),
             (
-                f"  {_format_model(match.model)}{turns} · {len(match.hits)} match(es) · "
+                f"  {_format_model(match.model)}{turns}{matches} · "
                 f"{_format_age(match.last_timestamp, now)} ago",
                 "grey50",
             ),
@@ -637,9 +652,14 @@ def _cmd_search(argv: list[str]) -> None:
         console.print()
 
     if not result.sessions:
-        console.print("[grey50]No matches.[/grey50]")
+        console.print(
+            "[grey50]No matches.[/grey50]" if args.query else "[grey50]No sessions.[/grey50]"
+        )
         return
-    tail = f"{len(result.sessions)} sessions · {result.total_hits} matches · {result.backend}"
+    if result.mode == "browse":
+        tail = f"{len(result.sessions)} recent sessions · {result.backend}"
+    else:
+        tail = f"{len(result.sessions)} sessions · {result.total_hits} matches · {result.backend}"
     if result.truncated:
         tail += " · truncated (raise --limit or narrow the query)"
     console.print(f"[grey50]{tail}[/grey50]")

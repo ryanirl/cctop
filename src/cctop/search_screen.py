@@ -171,7 +171,6 @@ class SearchScreen(ModalScreen):
 
         search_input = self.query_one("#search-input", Input)
         search_input.focus()
-        self._set_status(Text("type to search every account's history", style=MUTED))
         if self._initial_path:
             self.query_one("#path-input", Input).value = self._initial_path
         if self._initial_query:
@@ -179,6 +178,10 @@ class SearchScreen(ModalScreen):
             # first search, so a query passed on the CLI behaves exactly as if
             # it had been typed.
             search_input.value = self._initial_query
+        elif not self._initial_path:
+            # Nothing pre-filled fires no Input.Changed, so open directly on
+            # the recent-session browse listing.
+            self._start_search()
 
     # -- query handling (debounced, stale-result safe) -------------------------
 
@@ -211,9 +214,6 @@ class SearchScreen(ModalScreen):
 
     def _start_search(self) -> None:
         query, path_filter = self._inputs()
-        if len(query.strip()) < 2:
-            self._apply_result(query, path_filter, None, 0.0)
-            return
         self._run_search(query, path_filter, self._regex, self._within)
 
     @work(thread=True, exclusive=True, group="history-search")
@@ -225,13 +225,23 @@ class SearchScreen(ModalScreen):
         within: Path | None,
     ) -> None:
         started = time.monotonic()
-        result = histsearch.search_history(
-            query,
-            self._accounts,
-            regex=regex,
-            within=within,
-            path_filter=path_filter or None,
-        )
+        if len(query.strip()) >= 2:
+            result = histsearch.search_history(
+                query,
+                self._accounts,
+                regex=regex,
+                within=within,
+                path_filter=path_filter or None,
+            )
+        else:
+            # An empty (or single-character) query browses recent sessions
+            # instead, so the screen doubles as a session browser and a path
+            # filter alone answers "what ran in this repo".
+            result = histsearch.list_sessions(
+                self._accounts,
+                within=within,
+                path_filter=path_filter or None,
+            )
         elapsed = time.monotonic() - started
         self.app.call_from_thread(self._apply_result, query, path_filter, result, elapsed)
 
@@ -275,17 +285,20 @@ class SearchScreen(ModalScreen):
                 _fit(match.title, _TITLE_WIDTH),
                 Text(_fit(_format_model(match.model), _MODEL_WIDTH), style=MUTED),
                 str(match.turns) if match.turns is not None else "-",
-                str(len(match.hits)),
+                str(len(match.hits)) if match.hits else "-",
                 Text(_format_age(match.started, now), style=MUTED),
                 Text(_format_age(match.last_timestamp, now), style=MUTED),
                 key=str(index),
             )
 
         status = Text()
-        status.append(
-            f"{len(result.sessions)} sessions · {result.total_hits} matches",
-            style="default",
-        )
+        if result.mode == "browse":
+            status.append(f"{len(result.sessions)} recent sessions", style="default")
+        else:
+            status.append(
+                f"{len(result.sessions)} sessions · {result.total_hits} matches",
+                style="default",
+            )
         status.append(f" · {result.backend} · {elapsed * 1000:.0f}ms", style=MUTED)
         if result.truncated:
             status.append(" · truncated", style=MUTED)
@@ -308,6 +321,16 @@ class SearchScreen(ModalScreen):
         query = query if query is not None else self.query_one("#search-input", Input).value
 
         now = datetime.now(timezone.utc)
+        if not match.hits:
+            # Browse mode: no matched snippets, so show the session's card.
+            info = Text()
+            info.append(match.title, style=f"bold {TEAL}")
+            info.append(f"\n{match.cwd or match.project}", style=MUTED)
+            info.append(f"\nsession {match.session_id}", style=MUTED)
+            info.append("\nenter to read the transcript", style=MUTED)
+            widget.update(info)
+            return
+
         lines: list = []
         for hit in match.hits[:_PREVIEW_HITS]:
             header = Text()

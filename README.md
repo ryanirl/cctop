@@ -98,9 +98,14 @@ resumed **under the account that owns it**: cctop pins `CLAUDE_CONFIG_DIR` and
 the session's working directory and hands off to `claude --resume` /
 `codex resume`.
 
+With an **empty search bar the screen is a session browser**: it opens on your
+recent sessions across every account, newest first, and the PATH bar alone
+narrows them ("what ran in this repo"), with `Enter` reading any of them.
+
 `cctop search` on its own opens the same search TUI standalone;
 `cctop search "query"` opens it with the query already entered. With `--json`
-or a piped stdout it prints instead, so scripts still work:
+or a piped stdout it prints instead, so scripts still work (no query lists
+recent sessions as `{"type": "session", ...}` rows):
 `cctop search "query" [--regex] [--account NAME] [--dir PATH] [--limit N]
 [--json]`, where `--json` emits one `{"type": "match", ...}` row per hit plus
 a trailing `{"type": "summary", ...}` row.

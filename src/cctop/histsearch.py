@@ -74,12 +74,17 @@ class SessionMatch:
 
 @dataclass(frozen=True)
 class SearchResult:
-    """The outcome of one search: grouped sessions plus honesty metadata."""
+    """The outcome of one search: grouped sessions plus honesty metadata.
+
+    `mode` is "search" for query matches or "browse" for the no-query recent
+    listing, so the UI can label the result set honestly.
+    """
 
     sessions: list[SessionMatch]
     total_hits: int
     truncated: bool
     backend: str
+    mode: str = "search"
 
 
 @dataclass(frozen=True)
@@ -602,6 +607,25 @@ def search_history(
     if len(ordered) > limit_sessions:
         ordered, truncated = ordered[:limit_sessions], True
 
+    sessions = _build_matches(ordered, meta_by_path, accounts, backend, {})
+
+    total_hits = sum(len(session.hits) for session in sessions)
+    return SearchResult(sessions, total_hits, truncated, backend_name)
+
+
+def _build_matches(
+    ordered: list[tuple[Path, list[SearchHit]]],
+    meta_by_path: dict[Path, _PathMeta],
+    accounts: list[Account],
+    backend: ripgrep.Backend | None,
+    last_by_path: dict[Path, datetime | None],
+) -> list[SessionMatch]:
+    """Displayed sessions from an already sorted-and-limited path list.
+
+    Shared by search (hits carry the last timestamp) and browse (the file
+    mtime, passed via `last_by_path`, stands in). Everything per-file here
+    (head read, turns count, liveness) runs only for sessions actually shown.
+    """
     need_codex = any(meta_by_path[path].account.provider == "codex" for path, _ in ordered)
     live_ids = _live_session_ids(accounts, need_codex) if ordered else set()
     turns_by_path = _count_turns(ordered, meta_by_path, backend)
@@ -616,6 +640,7 @@ def search_history(
             session_id = session_id or _codex_session_id(path)
         session_id = session_id or path.stem
 
+        stamps = [hit.timestamp for hit in hits if hit.timestamp is not None]
         sessions.append(
             SessionMatch(
                 session_id=session_id,
@@ -625,7 +650,7 @@ def search_history(
                 project=_short_cwd(cwd) if cwd else _slug_project(path),
                 title=head.title or session_id[:8],
                 cwd=cwd,
-                last_timestamp=last_timestamp(hits),
+                last_timestamp=max(stamps) if stamps else last_by_path.get(path),
                 hits=hits,
                 model=meta.model or head.model,
                 started=head.started,
@@ -633,9 +658,84 @@ def search_history(
                 turns=turns_by_path.get(path),
             )
         )
+    return sessions
 
-    total_hits = sum(len(session.hits) for session in sessions)
-    return SearchResult(sessions, total_hits, truncated, backend_name)
+
+def _path_slug(text: str) -> str:
+    """Approximate Claude Code's cwd-to-directory-name encoding.
+
+    Project directories are named by the cwd with every non-alphanumeric
+    character turned into a dash, so a path filter or dir scope can be matched
+    against directory names without reading any file.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", text)
+
+
+def list_sessions(
+    accounts: list[Account],
+    limit_sessions: int = 60,
+    within: Path | None = None,
+    path_filter: str | None = None,
+    backend: ripgrep.Backend | None = None,
+) -> SearchResult:
+    """Browse mode: every session under the roots, newest first, no query.
+
+    Used when the search bar is empty, so the screen opens as a recent-session
+    browser and a path filter alone can answer "what ran in this repo".
+    Ordering is by file mtime (true last activity, not last match).
+    """
+    roots = _roots(accounts)
+    needles: set[str] = set()
+    if path_filter and path_filter.strip():
+        text = str(Path(path_filter.strip()).expanduser())
+        needles = {text.casefold(), _path_slug(text).casefold()}
+    if within is not None:
+        within = within.expanduser().absolute()
+
+    candidates: list[tuple[float, Path, Account]] = []
+    for account, root in roots:
+        for path in root.rglob("*.jsonl"):
+            if "subagents" in path.parts:
+                continue
+
+            cwd = ""
+            if account.provider == "codex" and (needles or within is not None):
+                cwd = _head_meta(path, "codex").cwd
+            if within is not None:
+                if account.provider == "codex":
+                    if not _cwd_within(cwd, within):
+                        continue
+                else:
+                    # Match the project directory name against the scoped dir's
+                    # slug: exact for the dir itself, prefix for subdirectories.
+                    slug = _path_slug(str(within))
+                    name = path.parent.name
+                    if name != slug and not name.startswith(slug + "-"):
+                        continue
+            if needles:
+                haystack = f"{path} {cwd}".casefold()
+                if not any(needle in haystack for needle in needles):
+                    continue
+
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            candidates.append((mtime, path, account))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    truncated = len(candidates) > limit_sessions
+    candidates = candidates[:limit_sessions]
+
+    ordered: list[tuple[Path, list[SearchHit]]] = [(path, []) for _, path, _ in candidates]
+    meta_by_path = {path: _PathMeta(account) for _, path, account in candidates}
+    last_by_path: dict[Path, datetime | None] = {
+        path: datetime.fromtimestamp(mtime, tz=timezone.utc) for mtime, path, _ in candidates
+    }
+
+    backend_name = (backend or ripgrep.find_backend()).name
+    sessions = _build_matches(ordered, meta_by_path, accounts, backend, last_by_path)
+    return SearchResult(sessions, 0, truncated, backend_name, mode="browse")
 
 
 def resume_plan(match: SessionMatch, accounts: list[Account]) -> ResumePlan | None:

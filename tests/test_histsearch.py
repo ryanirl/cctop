@@ -359,6 +359,54 @@ def test_path_filter_combines_with_dir_scope(tmp_path: Path) -> None:
     assert conflicting.sessions == []
 
 
+def test_list_sessions_browses_newest_first(tmp_path: Path) -> None:
+    import os
+
+    account = _write_claude_account(
+        tmp_path, "old", "old talk", "abcd0000-0000-0000-0000-000000000020"
+    )
+    newer = _write_claude_account(
+        tmp_path, "new", "new talk", "abcd0000-0000-0000-0000-000000000021"
+    )
+    old_file = next((account.config_dir / "projects").rglob("*.jsonl"))
+    os.utime(old_file, (1_000_000_000, 1_000_000_000))
+
+    result = histsearch.list_sessions([account, newer], backend=PY_BACKEND)
+
+    assert result.mode == "browse"
+    assert [match.account for match in result.sessions] == ["cc-new", "cc-old"]
+    assert all(match.hits == [] for match in result.sessions)
+    assert result.sessions[0].title == "new title"
+    assert result.sessions[0].last_timestamp is not None
+
+
+def test_list_sessions_path_filter_and_dir_scope(tmp_path: Path) -> None:
+    account = _write_claude_account(
+        tmp_path, "browse", "text", "abcd0000-0000-0000-0000-000000000022"
+    )
+
+    by_name = histsearch.list_sessions([account], path_filter="project", backend=PY_BACKEND)
+    by_path = histsearch.list_sessions([account], path_filter="/tmp/project", backend=PY_BACKEND)
+    miss = histsearch.list_sessions([account], path_filter="other-repo", backend=PY_BACKEND)
+    scoped = histsearch.list_sessions([account], within=Path("/tmp/project"), backend=PY_BACKEND)
+    out_of_scope = histsearch.list_sessions([account], within=Path("/nowhere"), backend=PY_BACKEND)
+
+    assert len(by_name.sessions) == 1
+    assert len(by_path.sessions) == 1  # slug-matched against the dir name
+    assert miss.sessions == []
+    assert len(scoped.sessions) == 1
+    assert out_of_scope.sessions == []
+
+
+def test_list_sessions_includes_codex(tmp_path: Path) -> None:
+    account = _write_codex_account(tmp_path)
+
+    result = histsearch.list_sessions([account], path_filter="codex-project", backend=PY_BACKEND)
+
+    assert len(result.sessions) == 1
+    assert result.sessions[0].provider == "codex"
+
+
 def test_session_metadata_columns(tmp_path: Path) -> None:
     # model from the matched assistant line, started from the head, turns from
     # the assistant-line count, provider tag from the account.
