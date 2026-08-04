@@ -102,7 +102,8 @@ With an **empty search bar the screen is a session browser**: it opens on your
 recent sessions across every account, newest first, and the PATH bar alone
 narrows them ("what ran in this repo"). Browse and search behave identically;
 a query just adds match counts and snippets. No result is selected while you
-type: press `Down` (or click) to select a session, then `Enter` to read it.
+type; `Down`/`Up` move one cursor vertically through search bar, path bar,
+and results (or click a session), then `Enter` reads the selected one.
 
 `cctop search` on its own opens the same search TUI standalone;
 `cctop search "query"` opens it with the query already entered. With `--json`

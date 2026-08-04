@@ -43,9 +43,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a query-less `cctop search` with `--json`/piped output lists sessions as
   `{"type": "session", ...}` rows.
 - One cursor: while typing in the SEARCH or PATH bar no result row is
-  selected, so `Enter` in a bar never opens a session by accident. `Down` (or
-  a click) selects; `Up` past the first row returns to the bar; new results
-  always start unselected.
+  selected, so `Enter` in a bar never opens a session by accident. `Down` and
+  `Up` move one vertical cursor through the three zones in order (SEARCH bar,
+  PATH bar, results list): down from search focuses path, down from path
+  enters the list, up from the first row returns to path, up again to search.
+  A click selects and opens directly; new results always start unselected,
+  and keyboard focus only ever lives in the two bars.
 - `cctop search` with no query opens the search TUI; with a query it opens
   pre-filled. `--json` or piped stdout prints instead, as before.
 - Richer search results: an explicit provider column, a live marker (a teal

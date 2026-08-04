@@ -94,11 +94,12 @@ class SearchScreen(ModalScreen):
     #search-hint {{ height: 1; color: #808080; padding: 0 1; }}
     """
 
-    # Up/down and enter are screen bindings (not table focus) so the results
-    # can be steered and opened while the query input keeps keyboard focus,
-    # the way a search-as-you-type picker is expected to feel. The ctrl keys
-    # are priority bindings because the focused Input would otherwise consume
-    # them (ctrl+d is its delete-right).
+    # Up/down are screen bindings implementing one vertical cursor through the
+    # three zones: SEARCH bar, PATH bar, then the results list. Keyboard focus
+    # only ever lives in the two bars (the table is not focusable), so typing
+    # always edits a bar and arrows always mean "move through the zones". The
+    # ctrl keys are priority bindings because the focused Input would
+    # otherwise consume them (ctrl+d is its delete-right).
     BINDINGS = [
         ("escape", "close", "Close"),
         Binding("ctrl+r", "toggle_regex", "Regex", priority=True),
@@ -174,6 +175,8 @@ class SearchScreen(ModalScreen):
         table.add_column("start", key="start")
         table.add_column("last", key="last")
 
+        table.can_focus = False
+
         search_input = self.query_one("#search-input", Input)
         search_input.focus()
         if self._initial_path:
@@ -209,23 +212,30 @@ class SearchScreen(ModalScreen):
 
     def action_move_cursor(self, delta: int) -> None:
         table = self.query_one("#search-results", DataTable)
-        if table.row_count == 0:
+
+        if self._row_selected:
+            row = (table.cursor_row or 0) + delta
+            if row < 0:
+                # Up past the first row leaves the list into the bar above it.
+                self._set_row_selected(False)
+                self.query_one("#path-input", Input).focus()
+                self._render_preview()
+                return
+            table.move_cursor(row=min(table.row_count - 1, row), animate=False)
+            self._render_preview()
             return
 
-        if not self._row_selected:
-            if delta > 0:
+        focused_id = getattr(self.focused, "id", None)
+        if delta > 0:
+            if focused_id == "search-input":
+                self.query_one("#path-input", Input).focus()
+            elif table.row_count:
                 self._set_row_selected(True)
                 table.move_cursor(row=0, animate=False)
                 self._render_preview()
-            return
-
-        row = (table.cursor_row or 0) + delta
-        if row < 0:
-            self._set_row_selected(False)
-            self._render_preview()
-            return
-        table.move_cursor(row=min(table.row_count - 1, row), animate=False)
-        self._render_preview()
+        else:
+            if focused_id == "path-input":
+                self.query_one("#search-input", Input).focus()
 
     def _inputs(self) -> tuple[str, str]:
         return (
