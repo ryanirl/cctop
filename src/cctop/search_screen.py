@@ -1,25 +1,25 @@
 """The history-search screen: live search across every account's transcripts.
 
-Opened with `/` from the main view. A debounced input drives ripgrep-backed
-searches in a background thread (stale results are discarded, so fast typing
-never shows an old query's hits). Results are grouped by session and tagged
-with the owning account; the preview pane shows the matching messages with the
-query highlighted. Enter resumes the selected session under its own account
-via the owner binary. Read-only apart from that explicit hand-off.
+Opened with `/` from the main view, or standalone via `cctop search`. A
+debounced input drives ripgrep-backed searches in a background thread (stale
+results are discarded, so fast typing never shows an old query's hits).
+Results are grouped by session and tagged with the owning account; the preview
+pane shows the matching messages with the query highlighted. Enter opens the
+transcript viewer to read the conversation before resuming it. Read-only.
 """
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from rich.console import Group
 from rich.text import Text
 from textual import work
-from textual.app import ComposeResult
+from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.timer import Timer
@@ -82,19 +82,36 @@ class SearchScreen(ModalScreen):
     """
 
     # Up/down and enter are screen bindings (not table focus) so the results
-    # can be steered and resumed while the query input keeps keyboard focus,
-    # the way a search-as-you-type picker is expected to feel.
+    # can be steered and opened while the query input keeps keyboard focus,
+    # the way a search-as-you-type picker is expected to feel. The ctrl keys
+    # are priority bindings because the focused Input would otherwise consume
+    # them (ctrl+d is its delete-right).
     BINDINGS = [
         ("escape", "close", "Close"),
-        ("ctrl+r", "toggle_regex", "Regex"),
+        Binding("ctrl+r", "toggle_regex", "Regex", priority=True),
+        Binding("ctrl+d", "toggle_dir", "This dir only", priority=True),
         ("up", "move_cursor(-1)", "Up"),
         ("down", "move_cursor(1)", "Down"),
     ]
 
-    def __init__(self, accounts: list[Account]) -> None:
+    def __init__(
+        self,
+        accounts: list[Account],
+        initial_query: str = "",
+        regex: bool = False,
+        within: Path | None = None,
+        standalone: bool = False,
+    ) -> None:
         super().__init__()
         self._accounts = accounts
-        self._regex = False
+        self._initial_query = initial_query
+        self._regex = regex
+        # The directory scope: None searches everywhere. ctrl+d toggles it back
+        # and forth against the default (--dir when given, else the directory
+        # cctop was launched from).
+        self._within = within
+        self._within_default = within if within is not None else Path.cwd()
+        self._standalone = standalone
         self._timer: Timer | None = None
         self._result: histsearch.SearchResult | None = None
         self._matches: list[histsearch.SessionMatch] = []
@@ -108,7 +125,10 @@ class SearchScreen(ModalScreen):
             yield Rule(line_style="dashed")
             yield Static(id="search-preview")
             yield Static(
-                Text("enter resume · ctrl+r regex · esc close", style=MUTED),
+                Text(
+                    "enter view transcript · ctrl+r regex · ctrl+d this dir · esc close",
+                    style=MUTED,
+                ),
                 id="search-hint",
             )
 
@@ -119,8 +139,15 @@ class SearchScreen(ModalScreen):
         table.add_column("title", key="title", width=_TITLE_WIDTH)
         table.add_column("hits", key="hits")
         table.add_column("last", key="last")
-        self.query_one("#search-input", Input).focus()
+
+        search_input = self.query_one("#search-input", Input)
+        search_input.focus()
         self._set_status(Text("type to search every account's history", style=MUTED))
+        if self._initial_query:
+            # Setting the value fires Input.Changed, which debounces into the
+            # first search, so a query passed on the CLI behaves exactly as if
+            # it had been typed.
+            search_input.value = self._initial_query
 
     # -- query handling (debounced, stale-result safe) -------------------------
 
@@ -131,6 +158,10 @@ class SearchScreen(ModalScreen):
 
     def action_toggle_regex(self) -> None:
         self._regex = not self._regex
+        self._start_search()
+
+    def action_toggle_dir(self) -> None:
+        self._within = None if self._within is not None else self._within_default
         self._start_search()
 
     def action_move_cursor(self, delta: int) -> None:
@@ -146,12 +177,12 @@ class SearchScreen(ModalScreen):
         if len(query.strip()) < 2:
             self._apply_result(query, None, 0.0)
             return
-        self._run_search(query, self._regex)
+        self._run_search(query, self._regex, self._within)
 
     @work(thread=True, exclusive=True, group="history-search")
-    def _run_search(self, query: str, regex: bool) -> None:
+    def _run_search(self, query: str, regex: bool, within: Path | None) -> None:
         started = time.monotonic()
-        result = histsearch.search_history(query, self._accounts, regex=regex)
+        result = histsearch.search_history(query, self._accounts, regex=regex, within=within)
         elapsed = time.monotonic() - started
         self.app.call_from_thread(self._apply_result, query, result, elapsed)
 
@@ -205,6 +236,11 @@ class SearchScreen(ModalScreen):
             status.append(" · truncated", style=MUTED)
         if self._regex:
             status.append("  [regex]", style=TEAL)
+        if self._within is not None:
+            home = str(Path.home())
+            shown = str(self._within)
+            shown = "~" + shown[len(home) :] if shown.startswith(home) else shown
+            status.append(f"  [in {shown}]", style=TEAL)
         self._set_status(status)
         self._render_preview(query)
 
@@ -240,41 +276,57 @@ class SearchScreen(ModalScreen):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self._render_preview()
 
-    # -- resume ----------------------------------------------------------------
+    # -- open the transcript viewer --------------------------------------------
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        match = self._selected_match()
-        if match is not None:
-            self._resume(match)
+        self._open_viewer()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self._open_viewer()
+
+    def _open_viewer(self) -> None:
+        """Open the selected session's transcript to read before resuming."""
+        from .viewer_screen import TranscriptScreen
+
         match = self._selected_match()
-        if match is not None:
-            self._resume(match)
-
-    def _resume(self, match: histsearch.SessionMatch) -> None:
-        """Hand the terminal to the owner binary to resume this session.
-
-        The plan pins the session's own account (CLAUDE_CONFIG_DIR) and cwd;
-        cctop only launches the owner and takes the terminal back when it exits.
-        """
-        plan = histsearch.resume_plan(match, self._accounts)
-        if plan is None:
-            self.notify(
-                f"{match.provider} binary not found on PATH",
-                title="resume",
-                severity="warning",
-                timeout=5,
-            )
+        if match is None:
             return
-
-        with self.app.suspend():
-            env = dict(os.environ, **plan.env_extra)
-            try:
-                subprocess.run(plan.argv, env=env, cwd=plan.cwd)
-            except (OSError, KeyboardInterrupt):
-                pass
-        self.notify(f"returned from {match.account} session", title="resume", timeout=4)
+        query = self.query_one("#search-input", Input).value
+        self.app.push_screen(TranscriptScreen(match, query, self._regex, self._accounts))
 
     def action_close(self) -> None:
-        self.dismiss()
+        if self._standalone:
+            self.app.exit()
+        else:
+            self.dismiss()
+
+
+class SearchApp(App):
+    """A minimal host app so `cctop search` opens straight into the search TUI."""
+
+    TITLE = "cctop search"
+    SUB_TITLE = ""
+
+    def __init__(
+        self,
+        accounts: list[Account],
+        initial_query: str = "",
+        regex: bool = False,
+        within: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self._accounts = accounts
+        self._initial_query = initial_query
+        self._regex = regex
+        self._within = within
+
+    def on_mount(self) -> None:
+        self.push_screen(
+            SearchScreen(
+                self._accounts,
+                initial_query=self._initial_query,
+                regex=self._regex,
+                within=self._within,
+                standalone=True,
+            )
+        )

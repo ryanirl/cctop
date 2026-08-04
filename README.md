@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ryanirl/cctop/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanirl/cctop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](LICENSE)
-![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)
 ![macOS](https://img.shields.io/badge/macOS-only-lightgrey.svg)
 
 A live terminal monitor for your **Claude Code** and **OpenAI Codex** usage, in
@@ -38,7 +38,7 @@ is read-only except for two explicit, additive account actions. See
 
 ## Install
 
-Requires **macOS** and **Python 3.11+** (Linux support is planned).
+Requires **macOS** and **Python 3.10+** (Linux support is planned).
 
 The package is `cctop-tui`; the command it installs is `cctop`.
 
@@ -81,20 +81,31 @@ to the next auto refresh; `r` refreshes immediately and resets it.
 Search every conversation you have ever had, across all accounts and both
 providers, live as you type. Results are grouped by session, tagged with the
 owning account (`cc-0`, `cc-1`, `cx-0`, ...), titled from the session's own
-metadata, and previewed with the matching messages highlighted. Press `Enter`
-to resume the selected session **under the account that owns it** (cctop pins
-`CLAUDE_CONFIG_DIR` and the session's working directory and hands the terminal
-to `claude --resume` / `codex resume`); `Ctrl+R` toggles regex mode.
+metadata, and previewed with the matching messages highlighted. `Ctrl+R`
+toggles regex mode; `Ctrl+D` scopes the search to the directory you launched
+from (or pass `--dir PATH`).
+
+Press `Enter` to open the **transcript viewer**: read the conversation (tool
+noise hidden, matches highlighted, starting at the first match) to make sure
+it is the one you want. From there, `Enter`/`o` resumes it in the current
+terminal (cctop suspends and comes back when you exit), or `t` opens it in a
+new Terminal window and leaves cctop where it is. Either way the session is
+resumed **under the account that owns it**: cctop pins `CLAUDE_CONFIG_DIR` and
+the session's working directory and hands off to `claude --resume` /
+`codex resume`.
+
+`cctop search` on its own opens the same search TUI standalone;
+`cctop search "query"` opens it with the query already entered. With `--json`
+or a piped stdout it prints instead, so scripts still work:
+`cctop search "query" [--regex] [--account NAME] [--dir PATH] [--limit N]
+[--json]`, where `--json` emits one `{"type": "match", ...}` row per hit plus
+a trailing `{"type": "summary", ...}` row.
 
 It is fast because the scan is ripgrep: a real `rg` from PATH when present,
 otherwise the ripgrep embedded inside the Claude Code binary itself (validated
 before use), otherwise a pure-Python fallback so search always works. Matches
 are post-filtered so the query must occur in actual message text, never in
 metadata like a session id. No index, no cache, nothing written anywhere.
-
-The same search is scriptable: `cctop search "query" [--regex] [--account NAME]
-[--limit N] [--json]`, where `--json` emits one `{"type": "match", ...}` row
-per hit plus a trailing `{"type": "summary", ...}` row.
 
 ### Token refresh (`R`)
 

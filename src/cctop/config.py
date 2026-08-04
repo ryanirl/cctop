@@ -11,9 +11,13 @@ a pre-populated, commented starter for those who want to customize.
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10: tomllib landed in 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
 
 
 def config_dir() -> Path:

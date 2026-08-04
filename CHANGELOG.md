@@ -24,6 +24,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can never produce a false hit, and literal queries are JSON-escaped for the
   prefilter so quoted text still matches. Sidechain/subagent transcripts are
   excluded.
+- A transcript viewer between finding and resuming: `Enter` on a result opens
+  the conversation read-only (tool noise hidden, matches highlighted, starting
+  at the first match) to confirm it is the right session; from there `Enter`/`o`
+  resumes in the current terminal and `t` resumes in a new Terminal window,
+  leaving cctop running.
+- Directory scoping: `--dir PATH` (CLI) or `Ctrl+D` (TUI, toggles the launch
+  directory) restricts results to sessions whose working directory is under it.
+- `cctop search` with no query opens the search TUI; with a query it opens
+  pre-filled. `--json` or piped stdout prints instead, as before.
+- Python 3.10 support: `tomllib` falls back to `tomli` on 3.10 (the only
+  incompatibility), and CI now runs 3.10 through 3.13.
 
 ## [0.2.0] - 2026-07-19
 

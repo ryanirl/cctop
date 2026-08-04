@@ -75,6 +75,15 @@ class SearchResult:
 
 
 @dataclass(frozen=True)
+class Message:
+    """One conversational message, for the transcript viewer."""
+
+    role: str  # "user" or "assistant"
+    text: str
+    timestamp: datetime | None
+
+
+@dataclass(frozen=True)
 class ResumePlan:
     """The command that would resume a session under its owning account.
 
@@ -183,6 +192,91 @@ def _parse_codex_line(record: dict) -> tuple[str, str, datetime | None, str, str
     return role, text, _parse_timestamp(record.get("timestamp")), "", ""
 
 
+def _dialogue_text(message: dict) -> str:
+    """Only the conversational text of a message (no tool traffic).
+
+    The viewer shows the dialogue a human would read; tool calls and results
+    are searchable (via _message_text) but would drown the conversation here.
+    """
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in ("text", "thinking"):
+                value = block.get("text") or block.get("thinking")
+                if isinstance(value, str) and value:
+                    parts.append(value)
+        return "\n".join(parts)
+    return ""
+
+
+# Lines without one of these markers cannot be conversational messages, so the
+# (expensive) JSON parse is skipped; this is what keeps a 100 MB transcript
+# with multi-megabyte snapshot lines loadable in well under a second.
+_MESSAGE_MARKERS = ('"type":"user"', '"type":"assistant"', '"type": "user"', '"type": "assistant"')
+_CODEX_MARKER = '"event_msg"'
+
+
+def read_conversation(
+    path: Path,
+    provider: str,
+    max_messages: int = 600,
+    max_chars: int = 3000,
+) -> tuple[list[Message], bool]:
+    """The session's dialogue for the viewer, newest-biased when capped.
+
+    Keeps the last `max_messages` messages (a capped transcript almost always
+    matters at its end) and trims each message to `max_chars`. Returns
+    (messages, truncated).
+    """
+    from collections import deque
+
+    kept: deque[Message] = deque(maxlen=max_messages)
+    total = 0
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if provider == "codex":
+                    if _CODEX_MARKER not in line:
+                        continue
+                elif not any(marker in line for marker in _MESSAGE_MARKERS):
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+
+                if provider == "codex":
+                    parsed = _parse_codex_line(record)
+                    if parsed is None:
+                        continue
+                    role, text, timestamp, _, _ = parsed
+                else:
+                    if record.get("type") not in ("user", "assistant") or record.get("isSidechain"):
+                        continue
+                    message = record.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    role = str(record.get("type"))
+                    text = _dialogue_text(message)
+                    timestamp = _parse_timestamp(record.get("timestamp"))
+                if not text.strip():
+                    continue
+
+                if len(text) > max_chars:
+                    text = text[:max_chars] + " ... (truncated)"
+                kept.append(Message(role, text, timestamp))
+                total += 1
+    except OSError:
+        return [], False
+
+    return list(kept), total > len(kept)
+
+
 def _match_span(text: str, query: str, pattern: re.Pattern[str] | None) -> tuple[int, int] | None:
     """Where the query first occurs in decoded message text, or None.
 
@@ -279,6 +373,22 @@ def _short_cwd(cwd: str) -> str:
     return "~" + cwd[len(home) :] if cwd.startswith(home) else cwd
 
 
+def _cwd_within(cwd: str, within: Path) -> bool:
+    """Whether a session's recorded cwd is the filter dir or under it.
+
+    Compared against both the literal and the symlink-resolved filter path,
+    because transcripts record cwds verbatim (on macOS /tmp and /private/tmp
+    are the same place but compare unequal).
+    """
+    if not cwd:
+        return False
+    path = Path(cwd)
+    for base in {within, within.resolve()}:
+        if path == base or path.is_relative_to(base):
+            return True
+    return False
+
+
 def search_history(
     query: str,
     accounts: list[Account],
@@ -286,12 +396,15 @@ def search_history(
     limit_sessions: int = 60,
     per_file_cap: int = 20,
     max_hits: int = 500,
+    within: Path | None = None,
     backend: ripgrep.Backend | None = None,
 ) -> SearchResult:
     """Search every account's transcripts and group the hits by session.
 
     Sessions are ordered by their most recent matching message, newest first,
     which is the "which conversation was that" ordering a history search wants.
+    `within` restricts results to sessions whose working directory is that
+    directory or below it.
     """
     query = query.strip()
     if len(query) < 2:
@@ -338,6 +451,19 @@ def search_history(
             session_id or (previous[1] if previous else ""),
             cwd or (previous[2] if previous else ""),
         )
+
+    if within is not None:
+        within = within.expanduser().absolute()
+        filtered: dict[Path, list[SearchHit]] = {}
+        for path, hits in hits_by_path.items():
+            account, session_id, cwd = meta_by_path[path]
+            if not cwd:
+                # Codex lines carry no cwd; read it from the rollout head.
+                _, cwd = _head_meta(path, account.provider)
+                meta_by_path[path] = (account, session_id, cwd)
+            if _cwd_within(cwd, within):
+                filtered[path] = hits
+        hits_by_path = filtered
 
     # Sort and cut BEFORE reading transcript heads for titles, so the per-file
     # metadata read happens only for the sessions that will actually be shown.
@@ -407,3 +533,54 @@ def resume_plan(match: SessionMatch, accounts: list[Account]) -> ResumePlan | No
     account = next((entry for entry in accounts if entry.name == match.account), None)
     env_extra = {"CLAUDE_CONFIG_DIR": str(account.config_dir)} if account else {}
     return ResumePlan([claude, "--resume", match.session_id], env_extra, cwd)
+
+
+def _new_terminal_script(plan: ResumePlan) -> str:
+    """The shell script a fresh Terminal window runs to resume the session.
+
+    Written to a temp file and handed to Terminal so no shell-quoting of the
+    command ever passes through AppleScript (the same trick as watch-term).
+    """
+    import shlex
+
+    lines = ["#!/bin/sh"]
+    if plan.cwd is not None:
+        lines.append(f"cd {shlex.quote(str(plan.cwd))}")
+    for key, value in plan.env_extra.items():
+        lines.append(f"export {key}={shlex.quote(value)}")
+    lines.append("exec " + " ".join(shlex.quote(part) for part in plan.argv))
+    return "\n".join(lines) + "\n"
+
+
+def resume_in_new_terminal(plan: ResumePlan) -> str | None:
+    """Resume the session in a new Terminal window; error string or None.
+
+    macOS-only (like cctop): writes the resume command to a temp script and has
+    Terminal.app run it, so the current cctop keeps the terminal it is in.
+    """
+    import subprocess
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        prefix="cctop-resume-",
+        suffix=".sh",
+        delete=False,
+    )
+    with handle:
+        handle.write(_new_terminal_script(plan))
+
+    osascript = [
+        "osascript",
+        "-e",
+        f'tell application "Terminal" to do script "/bin/sh {handle.name}"',
+        "-e",
+        'tell application "Terminal" to activate',
+    ]
+    try:
+        result = subprocess.run(osascript, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"could not open Terminal: {error}"
+    if result.returncode != 0:
+        return f"could not open Terminal: {result.stderr.strip() or 'osascript failed'}"
+    return None

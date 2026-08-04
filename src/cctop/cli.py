@@ -507,17 +507,25 @@ def _cmd_add_account(argv: list[str]) -> None:
 
 
 def _cmd_search(argv: list[str]) -> None:
-    """`cctop search QUERY`: search all accounts' conversation history.
+    """`cctop search [QUERY]`: search all accounts' conversation history.
 
-    Read-only and free: a ripgrep pass over the transcript files every account
-    already has on disk, grouped by session and tagged with the owning account.
-    `--json` emits machine-readable JSONL (one match row per hit plus a summary
-    row) for scripts and skills.
+    With a terminal attached this opens the search TUI (query pre-filled when
+    given) so results can be explored, read, and resumed. `--json`, or a piped
+    stdout, prints instead: machine-readable JSONL (one match row per hit plus
+    a summary row) or a readable table. Read-only and free either way: a
+    ripgrep pass over transcript files already on disk.
     """
+    import sys
+
     from . import histsearch
 
     parser = argparse.ArgumentParser(prog="cctop search")
-    parser.add_argument("query", help="Text to search for (case-insensitive).")
+    parser.add_argument(
+        "query",
+        nargs="?",
+        default="",
+        help="Text to search for (case-insensitive); omit to open the TUI empty.",
+    )
     parser.add_argument("--regex", action="store_true", help="Treat the query as a regex.")
     parser.add_argument(
         "--account",
@@ -525,6 +533,13 @@ def _cmd_search(argv: list[str]) -> None:
         metavar="NAME",
         default=None,
         help="Only search this account (repeatable; default: all).",
+    )
+    parser.add_argument(
+        "--dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Only sessions whose working directory is under PATH.",
     )
     parser.add_argument("--limit", type=int, default=20, help="Max sessions shown (default 20).")
     parser.add_argument("--json", action="store_true", help="Emit JSONL match/summary rows.")
@@ -534,11 +549,27 @@ def _cmd_search(argv: list[str]) -> None:
     if args.account:
         accounts = [account for account in accounts if account.name in args.account]
 
+    if not args.json and sys.stdout.isatty():
+        from .search_screen import SearchApp
+
+        SearchApp(
+            accounts,
+            initial_query=args.query,
+            regex=args.regex,
+            within=args.dir,
+        ).run()
+        return
+
+    if not args.query:
+        Console().print("[red]a query is required with --json or piped output[/red]")
+        return
+
     result = histsearch.search_history(
         args.query,
         accounts,
         regex=args.regex,
         limit_sessions=max(1, args.limit),
+        within=args.dir,
     )
 
     if args.json:

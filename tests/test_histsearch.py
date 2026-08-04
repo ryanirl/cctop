@@ -225,6 +225,98 @@ def test_json_escaped_query_prefilters_quoted_text(tmp_path: Path) -> None:
     assert len(result.sessions) == 1
 
 
+def test_within_dir_filters_by_session_cwd(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".claude"
+    project = config_dir / "projects" / "-tmp-project"
+    project.mkdir(parents=True)
+
+    inside = "aaaa9999-0000-0000-0000-000000000001"
+    (project / f"{inside}.jsonl").write_text(_claude_line("needle here", session_id=inside) + "\n")
+    outside = "aaaa9999-0000-0000-0000-000000000002"
+    line = json.loads(_claude_line("needle there", session_id=outside))
+    line["cwd"] = "/somewhere/else"
+    (project / f"{outside}.jsonl").write_text(json.dumps(line) + "\n")
+
+    account = Account("cc-0", config_dir)
+    result = histsearch.search_history(
+        "needle", [account], within=Path("/tmp/project"), backend=PY_BACKEND
+    )
+
+    assert [match.session_id for match in result.sessions] == [inside]
+
+    # A subdirectory cwd still counts as within the parent.
+    sub = histsearch.search_history("needle", [account], within=Path("/tmp"), backend=PY_BACKEND)
+    assert len(sub.sessions) == 1
+
+
+def test_within_dir_filters_codex_via_head_read(tmp_path: Path) -> None:
+    account = _write_codex_account(tmp_path)
+
+    hit = histsearch.search_history(
+        "codex needle", [account], within=Path("/tmp/codex-project"), backend=PY_BACKEND
+    )
+    miss = histsearch.search_history(
+        "codex needle", [account], within=Path("/nowhere"), backend=PY_BACKEND
+    )
+
+    assert len(hit.sessions) == 1
+    assert miss.sessions == []
+
+
+def test_read_conversation_returns_dialogue_in_order(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    lines = [
+        json.dumps({"type": "ai-title", "aiTitle": "t"}),
+        _claude_line("first question"),
+        _claude_line("the answer", role="assistant"),
+        # Tool-only content must not appear in the dialogue view.
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
+                },
+                "timestamp": "2026-07-01T12:00:02Z",
+            }
+        ),
+    ]
+    path.write_text("\n".join(lines) + "\n")
+
+    messages, truncated = histsearch.read_conversation(path, "claude")
+
+    assert [(m.role, m.text) for m in messages] == [
+        ("user", "first question"),
+        ("assistant", "the answer"),
+    ]
+    assert not truncated
+
+
+def test_read_conversation_caps_keep_the_tail(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    lines = [_claude_line(f"message {index}") for index in range(10)]
+    path.write_text("\n".join(lines) + "\n")
+
+    messages, truncated = histsearch.read_conversation(path, "claude", max_messages=3)
+
+    assert truncated
+    assert [m.text for m in messages] == ["message 7", "message 8", "message 9"]
+
+
+def test_new_terminal_script_pins_account_and_cwd(tmp_path: Path) -> None:
+    plan = histsearch.ResumePlan(
+        argv=["/usr/local/bin/claude", "--resume", "abc"],
+        env_extra={"CLAUDE_CONFIG_DIR": str(tmp_path / ".claude-1")},
+        cwd=tmp_path,
+    )
+
+    script = histsearch._new_terminal_script(plan)
+
+    assert f"cd {tmp_path}" in script
+    assert f"export CLAUDE_CONFIG_DIR={tmp_path}/.claude-1" in script
+    assert script.rstrip().endswith("exec /usr/local/bin/claude --resume abc")
+
+
 def test_subagent_transcripts_are_skipped(tmp_path: Path) -> None:
     config_dir = tmp_path / ".claude"
     session = "ffff6666-0000-0000-0000-000000000000"
