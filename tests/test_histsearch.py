@@ -216,6 +216,27 @@ def test_resume_plan_pins_owning_account(tmp_path: Path, monkeypatch) -> None:
     assert plan.env_extra == {"CLAUDE_CONFIG_DIR": str(account.config_dir)}
 
 
+def test_resume_plan_default_account_drops_config_dir_env(tmp_path: Path, monkeypatch) -> None:
+    # The default account resumes WITHOUT CLAUDE_CONFIG_DIR (even inherited):
+    # pinning it to ~/.claude forks Claude Code onto a parallel per-dir
+    # identity instead of the login the user's own `claude` command uses.
+    account = _write_claude_account(
+        tmp_path, "one", "needle", "aaaa1111-0000-0000-0000-000000000016"
+    )
+    result = histsearch.search_history("needle", [account], backend=PY_BACKEND)
+    match = result.sessions[0]
+
+    default_account = Account(account.name, tmp_path / ".claude")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("cctop.authctl.find_claude_binary", lambda: "/usr/local/bin/claude")
+    plan = histsearch.resume_plan(match, [default_account])
+
+    assert plan is not None
+    assert plan.env_extra == {}
+    assert plan.env_drop == ("CLAUDE_CONFIG_DIR",)
+    assert "unset CLAUDE_CONFIG_DIR" in histsearch._new_terminal_script(plan)
+
+
 def test_resume_plan_none_without_binary(tmp_path: Path, monkeypatch) -> None:
     account = _write_claude_account(
         tmp_path, "one", "needle", "aaaa1111-0000-0000-0000-000000000007"

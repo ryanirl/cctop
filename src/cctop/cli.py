@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .collect import Account, build_snapshot, default_accounts
+from .manage import AddPlan
 from .models import AccountLimits, FleetSnapshot, LimitWindow, SessionState
 from .status import SessionStatus
 
@@ -347,14 +348,17 @@ def _cmd_doctor(accounts: list[Account] | None = None) -> None:
 
 
 def reusable_logged_out_dir(home: Path) -> Path | None:
-    """The lowest-index existing `.claude-N` that has no credential of its own.
+    """The lowest-index existing `.claude-N` that is not a signed-in account.
 
     So an account created earlier but never signed into gets filled in on the
-    next add, instead of leaving it stranded and minting a fresh index. Uses the
-    strict per-config-dir credential check (never the shared default), so an
-    empty dir is not mistaken for logged-in.
+    next add, instead of leaving it stranded and minting a fresh index. Signed
+    in means: an on-disk credentials file (which cannot outlive its dir), or a
+    Keychain credential CORROBORATED by the dir's own identity -- a Keychain
+    entry alone can be a ghost from a deleted dir at the same path (macOS keeps
+    the entry when the dir is removed), and treating one as a login is how a
+    brand-new dir gets skipped and a spurious extra index minted.
     """
-    from . import authctl
+    from . import authctl, usage
 
     candidates = sorted(
         (
@@ -365,20 +369,26 @@ def reusable_logged_out_dir(home: Path) -> Path | None:
         key=lambda path: int(path.name[len(".claude-") :]),
     )
     for path in candidates:
-        if not authctl.has_credentials(path):
-            return path
+        if authctl.credentials_file_present(path):
+            continue
+        if authctl.keychain_credential_present(path) and usage.oauth_account(path):
+            continue
+        return path
     return None
 
 
 def run_login(config_dir: Path, console: Console) -> bool:
     """Run `claude auth login` for one account, interactively; True on success.
 
-    Scoped to config_dir via CLAUDE_CONFIG_DIR and its own per-dir Keychain
-    service, so signing in here can never read or overwrite another account's
-    credential. stdio is inherited so the browser OAuth flow works; cctop writes
-    nothing itself.
+    Scoped to the account via authctl.claude_env (an explicit config dir is
+    pinned to its own per-dir Keychain service; the default dir runs without
+    CLAUDE_CONFIG_DIR so its real login is used, not a forked per-dir one), so
+    signing in here can never overwrite another account's credential. stdio is
+    inherited so the browser OAuth flow works; cctop writes nothing itself.
+    After a successful login, warns when the new login is the same Claude
+    account as an existing one -- the browser signs into whichever claude.ai
+    account is already active, which is how "new" accounts silently merge.
     """
-    import os
     import subprocess
 
     from . import authctl
@@ -391,13 +401,41 @@ def run_login(config_dir: Path, console: Console) -> bool:
         )
         return False
 
-    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(config_dir))
-    console.print(f"\n[bold]Signing in[/bold] [grey50](config dir {config_dir})[/grey50]\n")
+    console.print(f"\n[bold]Signing in[/bold] [grey50](config dir {config_dir})[/grey50]")
+    console.print(
+        "[grey50]The browser signs in with whichever claude.ai account is "
+        "already active; for a different account, log out at claude.ai first "
+        "or use a private window.[/grey50]\n"
+    )
     try:
-        result = subprocess.run([binary, "auth", "login"], env=env)
+        result = subprocess.run([binary, "auth", "login"], env=authctl.claude_env(config_dir))
     except (OSError, KeyboardInterrupt):
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    _warn_if_duplicate_login(config_dir, console)
+    return True
+
+
+def _warn_if_duplicate_login(config_dir: Path, console: Console) -> None:
+    """Say so, loudly, when a fresh login landed on an already-known account."""
+    from . import usage
+
+    identity = usage.oauth_account(config_dir)
+    uuid = identity.get("accountUuid")
+    if not uuid:
+        return
+    for account in default_accounts():
+        if account.provider != "claude" or account.config_dir == config_dir:
+            continue
+        if usage.oauth_account(account.config_dir).get("accountUuid") == uuid:
+            email = identity.get("emailAddress") or "this account"
+            console.print(
+                f"[yellow]note: this signed in as the SAME Claude account as "
+                f"{account.name} ({email}). For a separate account, log out at "
+                f"claude.ai (or use a private window) and run /login again.[/yellow]"
+            )
+            return
 
 
 def resolve_config_dir(spec: str) -> Path | None:
@@ -407,6 +445,29 @@ def resolve_config_dir(spec: str) -> Path | None:
             return account.config_dir
     path = Path(spec).expanduser()
     return path if path.is_dir() else None
+
+
+def _warn_leftover_keychain_credential(plan: AddPlan, console: Console) -> None:
+    """Warn when the Keychain already holds a credential for a dir this fresh.
+
+    Keychain entries survive deleting a config dir, so a previous account at
+    the same path leaves a ghost credential behind; Claude Code will silently
+    adopt it instead of asking for a login, which reads as accounts merging.
+    cctop never deletes credentials, so this only tells the user how to.
+    """
+    from . import authctl
+
+    if not authctl.keychain_credential_present(plan.config_dir):
+        return
+    if plan.dir_exists and (plan.config_dir / ".claude.json").exists():
+        return  # an actual signed-in account at this path, not a ghost
+    service = authctl.keychain_services(plan.config_dir)[0]
+    console.print(
+        f"  [yellow]! the Keychain already holds a credential for this path "
+        f"(left over from a previous account). Claude Code will adopt that "
+        f"login instead of asking you to sign in. To start clean:[/yellow]\n"
+        f"    [grey50]security delete-generic-password -s '{service}'[/grey50]"
+    )
 
 
 def _cmd_add_account(argv: list[str]) -> None:
@@ -450,6 +511,12 @@ def _cmd_add_account(argv: list[str]) -> None:
     plan = manage.plan_add(home, args.alias, reuse_dir=reuse_dir)
     console = Console()
 
+    if args.alias is not None:
+        conflict = manage.alias_index_conflict(args.alias, plan.index)
+        if conflict is not None:
+            console.print(f"[red]--alias: {conflict}[/red]")
+            return
+
     source_dir = None
     if args.source is not None:
         source_dir = resolve_config_dir(args.source)
@@ -461,6 +528,7 @@ def _cmd_add_account(argv: list[str]) -> None:
             return
 
     console.print(f"[bold]Add account[/bold]  config dir [magenta]{plan.config_dir}[/magenta]")
+    _warn_leftover_keychain_credential(plan, console)
     if source_dir is not None:
         console.print(f"  clone from : {source_dir}  {list(manage.CONFIG_ALLOWLIST)}")
     if args.alias is not None:

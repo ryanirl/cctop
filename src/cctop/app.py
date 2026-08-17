@@ -479,7 +479,12 @@ class CctopApp(App):
         from rich.console import Console
 
         from . import manage
-        from .cli import resolve_config_dir, reusable_logged_out_dir, run_login
+        from .cli import (
+            _warn_leftover_keychain_credential,
+            resolve_config_dir,
+            reusable_logged_out_dir,
+            run_login,
+        )
         from .collect import discover_accounts
 
         home = Path.home()
@@ -490,12 +495,29 @@ class CctopApp(App):
             console.print("[bold]Add a Claude account[/bold]")
             console.print(f"existing: {'  '.join(claude)}\n")
 
+            # Decide the target dir BEFORE asking for a name, so the user never
+            # has to guess which index this account will get (a typed alias
+            # like cc-2 for what becomes ~/.claude-1 inverts the naming).
+            reuse_dir = reusable_logged_out_dir(home)
+            preview = manage.plan_add(home, reuse_dir=reuse_dir)
+            console.print(
+                f"new account: config dir [magenta]{preview.config_dir}[/magenta]  "
+                f"[grey50](cc-{preview.index} in cctop)[/grey50]"
+            )
+            _warn_leftover_keychain_credential(preview, console)
+
             source_spec = console.input(
                 "Clone config (CLAUDE.md, settings, ...) from which account? [blank=none]: "
             ).strip()
             alias = console.input("Shell alias to set? [blank=none]: ").strip()
+            while alias:
+                conflict = manage.alias_index_conflict(alias, preview.index)
+                if conflict is None:
+                    break
+                console.print(f"[red]{conflict}[/red]")
+                alias = console.input("Shell alias to set? [blank=none]: ").strip()
 
-            plan = manage.plan_add(home, alias or None, reuse_dir=reusable_logged_out_dir(home))
+            plan = manage.plan_add(home, alias or None, reuse_dir=reuse_dir)
             source_dir = resolve_config_dir(source_spec) if source_spec else None
             if source_spec and (source_dir is None or source_dir == plan.config_dir):
                 console.print(f"[red]skipping clone: '{source_spec}' not usable[/red]")

@@ -37,6 +37,32 @@ def test_reusable_dir_ignores_non_matching_dirs(tmp_path: Path) -> None:
     assert cli.reusable_logged_out_dir(tmp_path) is None
 
 
+def test_reusable_dir_ignores_ghost_keychain_entry(tmp_path: Path, monkeypatch) -> None:
+    # A Keychain entry survives deleting ~/.claude-N, so a recreated dir at the
+    # same path gets a spurious "credential" hit. Without the dir's own
+    # identity to corroborate it, the dir must still count as logged out --
+    # treating the ghost as a login is how add-account skips a brand-new dir
+    # and mints an extra index.
+    from cctop import authctl
+
+    ghost = tmp_path / ".claude-1"
+    ghost.mkdir()
+    monkeypatch.setattr(authctl, "keychain_credential_present", lambda config_dir: True)
+
+    assert cli.reusable_logged_out_dir(tmp_path) == ghost
+
+
+def test_reusable_dir_skips_keychain_login_with_identity(tmp_path: Path, monkeypatch) -> None:
+    from cctop import authctl
+
+    signed_in = tmp_path / ".claude-1"
+    signed_in.mkdir()
+    (signed_in / ".claude.json").write_text(json.dumps({"oauthAccount": {"accountUuid": "u1"}}))
+    monkeypatch.setattr(authctl, "keychain_credential_present", lambda config_dir: True)
+
+    assert cli.reusable_logged_out_dir(tmp_path) is None
+
+
 def test_resolve_config_dir_by_path(tmp_path: Path) -> None:
     assert cli.resolve_config_dir(str(tmp_path)) == tmp_path
 

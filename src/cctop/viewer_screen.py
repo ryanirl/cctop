@@ -37,6 +37,8 @@ def resume_in_place(screen: ModalScreen, plan: histsearch.ResumePlan) -> None:
     """
     with screen.app.suspend():
         env = dict(os.environ, **plan.env_extra)
+        for key in plan.env_drop:
+            env.pop(key, None)
         try:
             subprocess.run(plan.argv, env=env, cwd=plan.cwd)
         except (OSError, KeyboardInterrupt):

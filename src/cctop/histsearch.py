@@ -103,13 +103,16 @@ class ResumePlan:
 
     Claude sessions resume via `claude --resume` with CLAUDE_CONFIG_DIR pinned
     to the account, so the right subscription and credentials are used; Codex
-    sessions via `codex resume`. `cwd` is the session's recorded working
+    sessions via `codex resume`. The default account instead DROPS the
+    variable (`env_drop`): setting it, even to ~/.claude, forks Claude Code
+    onto a parallel per-dir identity. `cwd` is the session's recorded working
     directory when it still exists (Claude Code requires resuming from it).
     """
 
     argv: list[str]
     env_extra: dict[str, str]
     cwd: Path | None
+    env_drop: tuple[str, ...] = ()
 
 
 def _roots(accounts: list[Account]) -> list[tuple[Account, Path]]:
@@ -805,14 +808,20 @@ def resume_plan(match: SessionMatch, accounts: list[Account]) -> ResumePlan | No
             return None
         return ResumePlan([codex, "resume", match.session_id], {}, cwd)
 
-    from .authctl import find_claude_binary
+    from .authctl import find_claude_binary, is_default_config_dir
 
     claude = find_claude_binary()
     if claude is None:
         return None
     account = next((entry for entry in accounts if entry.name == match.account), None)
-    env_extra = {"CLAUDE_CONFIG_DIR": str(account.config_dir)} if account else {}
-    return ResumePlan([claude, "--resume", match.session_id], env_extra, cwd)
+    argv = [claude, "--resume", match.session_id]
+    if account is None:
+        return ResumePlan(argv, {}, cwd)
+    if is_default_config_dir(account.config_dir):
+        # The default account must resume WITHOUT the variable (even inherited):
+        # pinning it to ~/.claude forks a parallel per-dir identity.
+        return ResumePlan(argv, {}, cwd, env_drop=("CLAUDE_CONFIG_DIR",))
+    return ResumePlan(argv, {"CLAUDE_CONFIG_DIR": str(account.config_dir)}, cwd)
 
 
 def _new_terminal_script(plan: ResumePlan) -> str:
@@ -826,6 +835,8 @@ def _new_terminal_script(plan: ResumePlan) -> str:
     lines = ["#!/bin/sh"]
     if plan.cwd is not None:
         lines.append(f"cd {shlex.quote(str(plan.cwd))}")
+    for key in plan.env_drop:
+        lines.append(f"unset {key}")
     for key, value in plan.env_extra.items():
         lines.append(f"export {key}={shlex.quote(value)}")
     lines.append("exec " + " ".join(shlex.quote(part) for part in plan.argv))

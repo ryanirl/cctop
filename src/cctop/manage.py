@@ -17,11 +17,17 @@ without any risk of destroying credentials, sessions, or shell config.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 ALIAS_MARKER = "# added by cctop"
+# cctop's own display names are cc-<N> derived from the DIRECTORY index
+# (cc-1 -> ~/.claude-1). A user-chosen shell alias in that namespace must
+# match, or the shell and the cctop UI end up naming the same account
+# differently (alias cc-2 launching what cctop shows as cc-1).
+_RESERVED_ALIAS = re.compile(r"^cc-(\d+)$")
 _RC_CANDIDATES = (".zshrc", ".bashrc", ".bash_profile", ".profile")
 
 # User-authored config worth cloning into a new account. This is an ALLOWLIST:
@@ -114,6 +120,24 @@ def plan_add(home: Path, name: str | None = None, reuse_dir: Path | None = None)
         alias_line=alias_line,
         dir_exists=config_dir.exists(),
         alias_exists=_alias_present(rc_file, alias_name),
+    )
+
+
+def alias_index_conflict(name: str, index: int) -> str | None:
+    """Why a requested alias must be refused, or None when it is fine.
+
+    Only aliases inside cctop's reserved cc-<N> namespace can conflict: cc-M
+    for a dir that will be ~/.claude-N (shown as cc-N in cctop) would make the
+    shell and the UI disagree about which account is which. Any name outside
+    that namespace (cc-work, personal, ...) is accepted as-is.
+    """
+    match = _RESERVED_ALIAS.match(name)
+    if match is None or int(match.group(1)) == index:
+        return None
+    return (
+        f"alias '{name}' clashes with cctop's naming: this account is "
+        f"~/.claude-{index}, shown as cc-{index} in cctop. Use cc-{index} "
+        f"(or a name outside cc-<N>, like cc-work)."
     )
 
 

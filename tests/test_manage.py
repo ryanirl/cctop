@@ -177,3 +177,21 @@ def test_detect_rc_file_prefers_file_with_marker(tmp_path: Path) -> None:
     (tmp_path / ".bashrc").write_text("export CLAUDE_CONFIG_DIR=$HOME/.claude-1\n")
 
     assert manage.detect_rc_file(tmp_path) == tmp_path / ".bashrc"
+
+
+# -- alias_index_conflict: shell aliases must not cross cctop's cc-<N> names ---
+
+
+def test_alias_matching_its_index_is_fine() -> None:
+    assert manage.alias_index_conflict("cc-1", 1) is None
+
+
+def test_alias_crossing_another_index_is_refused() -> None:
+    message = manage.alias_index_conflict("cc-2", 1)
+    assert message is not None
+    assert "cc-1" in message  # tells the user the name that would match
+
+
+def test_alias_outside_reserved_namespace_is_fine() -> None:
+    assert manage.alias_index_conflict("work", 1) is None
+    assert manage.alias_index_conflict("cc-work", 1) is None

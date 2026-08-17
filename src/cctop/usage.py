@@ -14,7 +14,6 @@ Anthropic's own API. It is never logged or persisted.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import urllib.error
@@ -22,6 +21,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .authctl import is_default_config_dir, keychain_services
 from .models import AccountLimits, LimitWindow
 
 API_BASE = "https://api.anthropic.com"
@@ -30,31 +30,36 @@ OAUTH_BETA = "oauth-2025-04-20"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 
-def _oauth_account(config_dir: Path) -> dict:
-    """The oauthAccount block from an account's .claude.json (identifiers only)."""
+def _oauth_block(path: Path) -> dict:
+    """The oauthAccount block from one .claude.json file, or {} if unreadable."""
     try:
-        record = json.loads((config_dir / ".claude.json").read_text())
+        record = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
     account = record.get("oauthAccount")
     return account if isinstance(account, dict) else {}
 
 
+def oauth_account(config_dir: Path) -> dict:
+    """The account's oauthAccount identity block (identifiers only).
+
+    An explicit config dir keeps its identity at <dir>/.claude.json. The
+    default dir's real identity is the home-level ~/.claude.json (that is
+    what a plain `claude` run reads); ~/.claude/.claude.json exists only if
+    something ran claude with CLAUDE_CONFIG_DIR=~/.claude set and is consulted
+    last, so a forked in-dir identity never shadows the real default login.
+    """
+    if is_default_config_dir(config_dir):
+        home_level = _oauth_block(config_dir.parent / ".claude.json")
+        if home_level:
+            return home_level
+    return _oauth_block(config_dir / ".claude.json")
+
+
 def read_tier(config_dir: Path) -> str | None:
     """The subscription tier string from .claude.json, e.g. default_claude_max_5x."""
-    tier = _oauth_account(config_dir).get("organizationRateLimitTier")
+    tier = oauth_account(config_dir).get("organizationRateLimitTier")
     return tier if isinstance(tier, str) else None
-
-
-def _keychain_service(config_dir: Path) -> str:
-    """The per-config-dir Keychain service name Claude Code uses on macOS.
-
-    Verified empirically: `Claude Code-credentials-<first 8 hex of
-    sha256(config_dir_path)>`. This is how a second account (a different
-    CLAUDE_CONFIG_DIR) is kept distinct from the default in one Keychain.
-    """
-    digest = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
-    return f"{KEYCHAIN_SERVICE}-{digest}"
 
 
 def _token_from_credentials_file(config_dir: Path) -> str | None:
@@ -87,22 +92,32 @@ def _keychain_lookup(service: str) -> str | None:
     return None
 
 
-def get_token(config_dir: Path) -> str | None:
-    """Resolve this account's OAuth token, keyed to its config dir (not the
-    default).
+def resolve_token(config_dir: Path) -> tuple[str | None, bool]:
+    """Resolve this account's OAuth token: (token, borrowed_default).
 
-    Prefers an on-disk credentials file; otherwise looks up the per-config-dir
-    Keychain service, then the legacy default service. The default is last so a
-    single-account setup still works but never shadows a second account with the
-    first account's token.
+    Prefers an on-disk credentials file, then the account's own Keychain
+    services (for the default ~/.claude dir the plain default service IS its
+    own store). As a last resort a non-default dir falls back to the default
+    service so a legacy single-account setup still works -- that case returns
+    borrowed_default=True, because the token belongs to the default account
+    and must never be presented as this account's without verification.
     """
     token = _token_from_credentials_file(config_dir)
     if token:
-        return token
-    token = _keychain_lookup(_keychain_service(config_dir))
-    if token:
-        return token
-    return _keychain_lookup(KEYCHAIN_SERVICE)
+        return token, False
+    for service in keychain_services(config_dir):
+        token = _keychain_lookup(service)
+        if token:
+            return token, False
+    if is_default_config_dir(config_dir):
+        return None, False
+    token = _keychain_lookup(KEYCHAIN_SERVICE)
+    return token, token is not None
+
+
+def get_token(config_dir: Path) -> str | None:
+    """The resolved token alone, for callers that only need presence."""
+    return resolve_token(config_dir)[0]
 
 
 def _get(url: str, token: str) -> tuple[int | None, dict[str, str], str]:
@@ -211,9 +226,21 @@ def fetch_account_limits(account: str, config_dir: Path) -> AccountLimits:
     credential) so the UI never shows one account's numbers under another.
     """
     tier = read_tier(config_dir)
-    token = get_token(config_dir)
+    token, borrowed_default = resolve_token(config_dir)
     if token is None:
         return AccountLimits(account, tier, [], "none", None, error="no token found")
+    if borrowed_default and not oauth_account(config_dir).get("organizationUuid"):
+        # Only the default account's token exists and this dir has no identity
+        # of its own to verify the response against: fetching would show the
+        # default account's numbers under this account's name.
+        return AccountLimits(
+            account,
+            tier,
+            [],
+            "none",
+            None,
+            error="no own credential - run this account and /login",
+        )
 
     status, headers, body = _get(f"{API_BASE}{USAGE_PATH}", token)
     if status in (401, 403):
@@ -252,7 +279,7 @@ def fetch_account_limits(account: str, config_dir: Path) -> AccountLimits:
     if status != 200:
         return AccountLimits(account, tier, [], "none", None, error=f"usage fetch: HTTP {status}")
 
-    expected_org = _oauth_account(config_dir).get("organizationUuid")
+    expected_org = oauth_account(config_dir).get("organizationUuid")
     got_org = headers.get("anthropic-organization-id")
     if expected_org and got_org and expected_org != got_org:
         return AccountLimits(

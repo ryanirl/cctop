@@ -191,11 +191,17 @@ differ in shape: Codex exposes primary/secondary windows plus per-model limits,
 and its stats come from rollout files rather than a stats cache). Codex sessions
 show token/context but no dollar cost, since Codex is subscription-based.
 
-The credential for the usage read is resolved per account from the macOS
-Keychain service `Claude Code-credentials-<sha256(config_dir)[:8]>`, used only to
-authenticate to Anthropic's own API, never logged or persisted. The usage
-response's org is verified against the account so one account can never show
-another's numbers.
+The credential for the usage read is resolved per account from the account's
+own macOS Keychain service, used only to authenticate to Anthropic's own API,
+never logged or persisted. An explicit config dir owns the hashed service
+`Claude Code-credentials-<sha256(config_dir)[:8]>`; the default `~/.claude`
+account owns the plain `Claude Code-credentials` service and the home-level
+`~/.claude.json` identity — the same stores a plain `claude` run uses, so
+cctop never probes (or forks) a parallel per-dir login for the default
+account, and delegated claude runs for it drop `CLAUDE_CONFIG_DIR` entirely.
+The usage response's org is verified against the account so one account can
+never show another's numbers; a token borrowed from the default service is
+never presented as another account's without that verification.
 
 Undocumented, version-internal formats (the sessions registry, transcript
 schema, usage JSON) are all read defensively and isolated to the collector core

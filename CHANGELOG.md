@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The default account (cc-0, `~/.claude`) is now probed as what it really is:
+  the account a plain `claude` run uses. Its identity is read from the
+  home-level `~/.claude.json` and its credential from the plain
+  `Claude Code-credentials` Keychain service, and every delegated claude run
+  for it (auth status, token refresh, login, session resume) now drops
+  `CLAUDE_CONFIG_DIR` instead of pinning it to `~/.claude`. Previously cctop
+  set the variable, which switched Claude Code onto a parallel per-dir
+  identity and Keychain service for the same directory — silently forking a
+  second login and showing cc-0 as an account the user never uses.
+- Adding an account now decides (and shows) the target `~/.claude-N` dir
+  BEFORE asking for a shell alias, and refuses an alias in cctop's reserved
+  `cc-<N>` namespace whose number does not match the dir index. Previously a
+  typed alias like `cc-2` for what became `.claude-1` was written as-is,
+  permanently inverting the shell's and the UI's names for the same accounts.
+- A Keychain entry alone no longer counts as "this `.claude-N` is signed in"
+  when deciding which dir a new account should fill: Keychain entries survive
+  deleting a config dir, so a ghost entry from a previous account at the same
+  path made add-account skip a brand-new dir and mint a spurious extra index.
+  A ghost entry found for a fresh dir is now reported, with the
+  `security delete-generic-password` line to clear it.
+- An account whose only resolvable token is the shared default Keychain
+  credential no longer shows usage numbers unless the response can be
+  verified against the account's own identity — before, a logged-out account
+  could display the default account's numbers as its own.
+- Login now warns up front that the browser signs in with whichever claude.ai
+  account is already active, and says so explicitly when a completed login
+  landed on the same Claude account as an existing one (the way "new"
+  accounts silently merge).
+
 ## [0.3.0] - 2026-08-04
 
 ### Added

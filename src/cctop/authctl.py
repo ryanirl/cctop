@@ -54,9 +54,53 @@ def find_claude_binary() -> str | None:
     return str(_BINARY_FALLBACK) if _BINARY_FALLBACK.exists() else None
 
 
+def is_default_config_dir(config_dir: Path) -> bool:
+    """Whether this is Claude Code's default config dir (~/.claude).
+
+    The default account's stores are NOT the per-dir ones: with no
+    CLAUDE_CONFIG_DIR set, Claude Code keeps identity in ~/.claude.json (home
+    level, next to the dir) and the credential under the un-suffixed Keychain
+    service. Treating ~/.claude like an explicit config dir (setting the env
+    var, hashing its path into a service name) silently forks a second,
+    parallel login for the same directory.
+    """
+    return config_dir == Path.home() / ".claude"
+
+
 def _keychain_service(config_dir: Path) -> str:
     digest = hashlib.sha256(str(config_dir).encode()).hexdigest()[:8]
     return f"{_KEYCHAIN_SERVICE}-{digest}"
+
+
+def keychain_services(config_dir: Path) -> tuple[str, ...]:
+    """The Keychain services that can hold this account's credential, in
+    lookup order.
+
+    An explicit config dir has exactly one: its hashed per-dir service. The
+    default dir's real credential lives under the plain default service; its
+    hashed service is consulted second, only to cover a setup that ever ran
+    claude with CLAUDE_CONFIG_DIR=~/.claude set explicitly.
+    """
+    if is_default_config_dir(config_dir):
+        return (_KEYCHAIN_SERVICE, _keychain_service(config_dir))
+    return (_keychain_service(config_dir),)
+
+
+def claude_env(config_dir: Path) -> dict[str, str]:
+    """The environment for a delegated claude run, scoped to one account.
+
+    An explicit config dir is pinned via CLAUDE_CONFIG_DIR. The default dir
+    must run WITHOUT the variable: setting it -- even to ~/.claude itself --
+    switches Claude Code onto the per-dir identity file and Keychain service,
+    forking a parallel login for the same directory instead of using the
+    account the user's own `claude` command uses.
+    """
+    env = dict(os.environ)
+    if is_default_config_dir(config_dir):
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    return env
 
 
 def _expiry_from_millis(value: object) -> datetime | None:
@@ -65,11 +109,23 @@ def _expiry_from_millis(value: object) -> datetime | None:
     return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
 
 
+def _keychain_read(service: str) -> str | None:
+    """The raw payload of one Keychain service, or None when absent/unreadable."""
+    command = ["security", "find-generic-password", "-s", service, "-w"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def read_expiry(config_dir: Path) -> datetime | None:
     """The access token's expiry from the account's own store (read-only).
 
-    Prefers the on-disk credentials file (no subprocess), then the per-dir
-    Keychain record, mirroring get_token's resolution order. Used to show a
+    Prefers the on-disk credentials file (no subprocess), then the account's
+    Keychain services, mirroring get_token's resolution order. Used to show a
     TTL, to decide whether a proactive refresh is due, and to tell whether a
     refresh actually renewed the token. None when unavailable.
     """
@@ -81,43 +137,54 @@ def read_expiry(config_dir: Path) -> datetime | None:
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
 
-    command = ["security", "find-generic-password", "-s", _keychain_service(config_dir), "-w"]
+    for service in keychain_services(config_dir):
+        raw = _keychain_read(service)
+        if raw is None:
+            continue
+        try:
+            oauth = json.loads(raw).get("claudeAiOauth") or {}
+        except json.JSONDecodeError:
+            continue
+        expiry = _expiry_from_millis(oauth.get("expiresAt"))
+        if expiry is not None:
+            return expiry
+    return None
+
+
+def credentials_file_present(config_dir: Path) -> bool:
+    """Whether the dir's own .credentials.json holds an access token.
+
+    A credentials file lives inside the dir, so unlike a Keychain entry it
+    cannot outlive the dir it belongs to.
+    """
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        oauth = json.loads(result.stdout.strip()).get("claudeAiOauth") or {}
-    except json.JSONDecodeError:
-        return None
-    return _expiry_from_millis(oauth.get("expiresAt"))
+        record = json.loads((config_dir / ".credentials.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    oauth = record.get("claudeAiOauth")
+    return isinstance(oauth, dict) and bool(oauth.get("accessToken"))
+
+
+def keychain_credential_present(config_dir: Path) -> bool:
+    """Whether any of the account's own Keychain services holds a credential.
+
+    Caveat: Keychain entries survive deleting the config dir, so a hit can be
+    a leftover from a previous account at the same path; callers deciding
+    "is this account set up?" should corroborate with the dir's identity.
+    """
+    return any(_keychain_read(service) for service in keychain_services(config_dir))
 
 
 def has_credentials(config_dir: Path) -> bool:
     """Whether this account has its own stored OAuth credential.
 
-    Checks only the config dir's own credentials file and its per-config-dir
-    Keychain service, never the shared default service, so a freshly created
-    (logged-out) dir correctly reads as having no credential rather than
-    borrowing the default account's token.
+    Checks only the account's own stores: its credentials file and its own
+    Keychain services (the per-dir hashed service; plus the plain default
+    service only for the default ~/.claude dir, where that IS the account's
+    own store). A freshly created explicit dir never borrows the default
+    account's token.
     """
-    credentials_file = config_dir / ".credentials.json"
-    try:
-        record = json.loads(credentials_file.read_text())
-        oauth = record.get("claudeAiOauth")
-        if isinstance(oauth, dict) and oauth.get("accessToken"):
-            return True
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    command = ["security", "find-generic-password", "-s", _keychain_service(config_dir), "-w"]
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and bool(result.stdout.strip())
+    return credentials_file_present(config_dir) or keychain_credential_present(config_dir)
 
 
 @dataclass(frozen=True)
@@ -134,15 +201,17 @@ class AuthStatus:
 def auth_status(config_dir: Path) -> AuthStatus:
     """Run the owner binary's headless status probe for one account.
 
-    Free and non-interactive; honors CLAUDE_CONFIG_DIR so each account reports
-    its own login. Returns an AuthStatus with `error` set (rather than raising)
-    when the binary is missing, times out, or emits unparsable output.
+    Free and non-interactive; scoped to the account via claude_env so each
+    account reports its own login (and the default account reports the real
+    default, not a forked per-dir identity). Returns an AuthStatus with
+    `error` set (rather than raising) when the binary is missing, times out,
+    or emits unparsable output.
     """
     binary = find_claude_binary()
     if binary is None:
         return AuthStatus(False, None, None, None, error="claude binary not found")
 
-    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(config_dir))
+    env = claude_env(config_dir)
     try:
         result = subprocess.run(
             [binary, *_STATUS_ARGS],
@@ -190,7 +259,7 @@ def _run_refresh_trigger(config_dir: Path) -> str | None:
     binary = find_claude_binary()
     if binary is None:
         return "claude binary not found"
-    env = dict(os.environ, CLAUDE_CONFIG_DIR=str(config_dir))
+    env = claude_env(config_dir)
     try:
         subprocess.run(
             [binary, *_REFRESH_ARGS],
