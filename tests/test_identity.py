@@ -133,6 +133,40 @@ def test_resolve_token_default_dir_never_borrows(tmp_path: Path, monkeypatch) ->
     assert usage.resolve_token(default_dir) == ("default-token", False)
 
 
+def test_fetch_limits_carries_the_login_email(tmp_path: Path, monkeypatch) -> None:
+    # The email rides on every AccountLimits so the UI can show WHICH Claude
+    # login each account is -- two accounts sharing one login become visible.
+    _fake_home(monkeypatch, tmp_path)
+    account_dir = tmp_path / ".claude-1"
+    account_dir.mkdir()
+    (account_dir / ".claude.json").write_text(
+        json.dumps(
+            {
+                "oauthAccount": {
+                    "emailAddress": "who@example.com",
+                    "accountUuid": "u1",
+                    "organizationUuid": "org1",
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(usage, "resolve_token", lambda config_dir: ("tok", False))
+    monkeypatch.setattr(
+        usage,
+        "_get",
+        lambda url, token: (200, {"anthropic-organization-id": "org1"}, json.dumps({"limits": []})),
+    )
+
+    limits = usage.fetch_account_limits("cc-1", account_dir)
+    assert limits.source == "api"
+    assert limits.email == "who@example.com"
+
+    monkeypatch.setattr(usage, "resolve_token", lambda config_dir: (None, False))
+    missing = usage.fetch_account_limits("cc-1", account_dir)
+    assert missing.error == "no token found"
+    assert missing.email == "who@example.com"  # error rows still say who they are
+
+
 def test_fetch_limits_refuses_borrowed_token_without_identity(tmp_path: Path, monkeypatch) -> None:
     _fake_home(monkeypatch, tmp_path)
     account_dir = tmp_path / ".claude-1"

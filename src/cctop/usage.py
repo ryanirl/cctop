@@ -224,23 +224,26 @@ def fetch_account_limits(account: str, config_dir: Path) -> AccountLimits:
     Returns source="none" with an `error` note when the token is missing, the
     request fails, or the token's org does not match this account (a wrong
     credential) so the UI never shows one account's numbers under another.
+    Every result carries the login's email so the UI can show which Claude
+    account each entry really is.
     """
-    tier = read_tier(config_dir)
+    identity = oauth_account(config_dir)
+    tier = identity.get("organizationRateLimitTier")
+    tier = tier if isinstance(tier, str) else None
+    email = identity.get("emailAddress")
+    email = email if isinstance(email, str) else None
+
+    def absent(error: str, **flags) -> AccountLimits:
+        return AccountLimits(account, tier, [], "none", None, error=error, email=email, **flags)
+
     token, borrowed_default = resolve_token(config_dir)
     if token is None:
-        return AccountLimits(account, tier, [], "none", None, error="no token found")
-    if borrowed_default and not oauth_account(config_dir).get("organizationUuid"):
+        return absent("no token found")
+    if borrowed_default and not identity.get("organizationUuid"):
         # Only the default account's token exists and this dir has no identity
         # of its own to verify the response against: fetching would show the
         # default account's numbers under this account's name.
-        return AccountLimits(
-            account,
-            tier,
-            [],
-            "none",
-            None,
-            error="no own credential - run this account and /login",
-        )
+        return absent("no own credential - run this account and /login")
 
     status, headers, body = _get(f"{API_BASE}{USAGE_PATH}", token)
     if status in (401, 403):
@@ -248,15 +251,7 @@ def fetch_account_limits(account: str, config_dir: Path) -> AccountLimits:
         # refresh token may rotate and invalidate the copy Claude Code relies
         # on); the monitor reacts to auth_expired by delegating a refresh to
         # the owner binary, the same thing the R key does.
-        return AccountLimits(
-            account,
-            tier,
-            [],
-            "none",
-            None,
-            error=f"token expired - run {account} to refresh",
-            auth_expired=True,
-        )
+        return absent(f"token expired - run {account} to refresh", auth_expired=True)
     if status == 429 or status is None or (status is not None and status >= 500):
         # Transient: rate limited (429), a server hiccup (5xx), or a network
         # failure (status None). Mark retriable so the monitor backs off and
@@ -266,35 +261,23 @@ def fetch_account_limits(account: str, config_dir: Path) -> AccountLimits:
             if status == 429
             else (f"HTTP {status}" if status else "network error")
         )
-        return AccountLimits(
-            account,
-            tier,
-            [],
-            "none",
-            None,
-            error=f"usage: {label}",
+        return absent(
+            f"usage: {label}",
             retriable=True,
             retry_after=_parse_retry_after(headers) if status == 429 else None,
         )
     if status != 200:
-        return AccountLimits(account, tier, [], "none", None, error=f"usage fetch: HTTP {status}")
+        return absent(f"usage fetch: HTTP {status}")
 
-    expected_org = oauth_account(config_dir).get("organizationUuid")
+    expected_org = identity.get("organizationUuid")
     got_org = headers.get("anthropic-organization-id")
     if expected_org and got_org and expected_org != got_org:
-        return AccountLimits(
-            account,
-            tier,
-            [],
-            "none",
-            None,
-            error="wrong credential (token org != account)",
-        )
+        return absent("wrong credential (token org != account)")
 
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
-        return AccountLimits(account, tier, [], "none", None, error="usage fetch: bad JSON")
+        return absent("usage fetch: bad JSON")
 
     return AccountLimits(
         account=account,
@@ -302,4 +285,5 @@ def fetch_account_limits(account: str, config_dir: Path) -> AccountLimits:
         windows=parse_windows(payload),
         source="api",
         fetched_at=datetime.now(timezone.utc),
+        email=email,
     )

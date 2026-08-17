@@ -139,6 +139,8 @@ def _tier_label(tier: str | None) -> str:
 def _render_limits(limits: list[AccountLimits], now: datetime, console: Console) -> None:
     for account in limits:
         header = f"[bold]{account.account}[/bold]"
+        if account.email:
+            header += f" [grey50]{account.email}[/grey50]"
         tier = _tier_label(account.tier)
         if tier:
             header += f" [grey50]({tier})[/grey50]"
@@ -222,6 +224,7 @@ def _snapshot_to_dict(snapshot: FleetSnapshot) -> dict:
         "limits": [
             {
                 "account": a.account,
+                "email": a.email,
                 "tier": a.tier,
                 "source": a.source,
                 "error": a.error,
@@ -257,17 +260,20 @@ def _cmd_accounts() -> None:
     console = Console()
     table = Table(title="cctop accounts", title_style="bold", expand=False)
     table.add_column("acct", style="magenta")
+    table.add_column("email", style="grey70")
     table.add_column("config dir", style="grey70")
     table.add_column("tier")
     table.add_column("token", justify="center")
     table.add_column("live", justify="right")
 
     for account in default_accounts():
+        identity = usage.oauth_account(account.config_dir)
         tier = _tier_label(usage.read_tier(account.config_dir)) or "-"
         has_token = usage.get_token(account.config_dir) is not None
         live = sum(1 for _ in read_registry(account.config_dir))
         table.add_row(
             account.name,
+            identity.get("emailAddress") or "-",
             str(account.config_dir).replace(str(Path.home()), "~"),
             tier,
             "[green]yes[/green]" if has_token else "[grey50]no[/grey50]",

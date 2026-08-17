@@ -105,6 +105,12 @@ def _account_block(
         header.append(tier, style=MUTED)
 
     lines = [header]
+    if account.email:
+        # Which Claude login this account really is, under the name: two
+        # accounts sharing one login then read as visibly identical instead of
+        # just behaving alike. Truncated to the gauge width so it never wraps.
+        line_width = label_width + 1 + bar_width + 12
+        lines.append(Text(_fit(account.email, line_width).rstrip(), style=MUTED))
     if account.source != "api":
         lines.append(Text(account.error or "no limit data", style=MUTED))
     else:

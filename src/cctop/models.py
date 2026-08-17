@@ -131,6 +131,10 @@ class AccountLimits:
     # (HTTP 401/403), so the monitor can trigger a delegated refresh without
     # parsing error strings.
     auth_expired: bool = False
+    # The login's email address (from the account's oauthAccount identity),
+    # shown next to the account name so two accounts that silently share one
+    # login are visibly the same instead of merely behaving the same.
+    email: str | None = None
 
 
 @dataclass(frozen=True)

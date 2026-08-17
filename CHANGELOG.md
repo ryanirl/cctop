@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Each Claude account's login email is shown with its usage: under the
+  account name in the TUI USAGE panel, next to the name in the `--once`
+  band, as an `email` column in `cctop accounts`, and as an `email` field in
+  `--json`. Two accounts silently sharing one login are now visibly the same
+  account instead of merely behaving the same.
+
 ### Fixed
 - The default account (cc-0, `~/.claude`) is now probed as what it really is:
   the account a plain `claude` run uses. Its identity is read from the
