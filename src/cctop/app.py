@@ -48,6 +48,12 @@ DIM = "grey37"
 MUTED = "grey50"
 BAR_WIDTH = 22
 
+def _row_key(state: SessionState) -> str:
+    """Unique table key per live process. Session ids repeat across pids when a
+    still-running session is resumed or forked, so key by account and pid."""
+    return f"{state.account}:{state.session.pid}"
+
+
 _STATUS_STYLE = {
     "idle": TEAL,
     "shell": "white",
@@ -237,8 +243,11 @@ class CctopApp(App):
         self._heatmap_weeks = heatmap_weeks
         self._auto_refresh_tokens = auto_refresh_tokens
         self._limits_timer: Timer | None = None
-        self._states_by_id: dict[str, SessionState] = {}
-        self._selected_session_id: str | None = None
+        # Rows are keyed per process (account:pid), not per session id: a
+        # `claude --resume` of a still-running session yields two live processes
+        # sharing one session id, and DataTable rejects duplicate row keys.
+        self._states_by_key: dict[str, SessionState] = {}
+        self._selected_row_key: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(id="topbar")
@@ -300,7 +309,7 @@ class CctopApp(App):
 
     def _render_sessions(self, states: list[SessionState], now: datetime) -> None:
         self._render_topbar(now)
-        self._states_by_id = {s.session.session_id: s for s in states}
+        self._states_by_key = {_row_key(s): s for s in states}
 
         table = self.query_one("#sessions", DataTable)
         table.clear()
@@ -318,9 +327,9 @@ class CctopApp(App):
                 _format_tokens(state.totals.total_tokens),
                 _format_cost(state.totals.cost_usd),
                 _format_age(state.last_activity, now),
-                key=session_id,
+                key=_row_key(state),
             )
-            if session_id == self._selected_session_id:
+            if _row_key(state) == self._selected_row_key:
                 selected_index = index
 
         # Keep the cursor on the same session across the 1s rebuild instead of
@@ -332,12 +341,12 @@ class CctopApp(App):
         self._render_footer(states, now)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        self._selected_session_id = event.row_key.value
+        self._selected_row_key = event.row_key.value
         self._render_detail(datetime.now(timezone.utc))
 
     def _render_detail(self, now: datetime) -> None:
-        selected = self._selected_session_id
-        state = self._states_by_id.get(selected) if selected is not None else None
+        selected = self._selected_row_key
+        state = self._states_by_key.get(selected) if selected is not None else None
         widget = self.query_one("#detail", Static)
         if state is None:
             widget.update(Text("", style=MUTED))
