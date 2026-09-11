@@ -208,7 +208,7 @@ def merge(api: AccountLimits, recorded: AccountLimits | None) -> AccountLimits:
     """
     if (
         recorded is None
-        or api.source != "api"
+        or api.source not in ("api", "probe")
         or recorded.fetched_at is None
         or (api.fetched_at is not None and recorded.fetched_at <= api.fetched_at)
     ):

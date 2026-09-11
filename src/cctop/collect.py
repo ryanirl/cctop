@@ -283,6 +283,23 @@ def resolve_limits(account: Account, now: datetime | None = None) -> AccountLimi
         email=email if isinstance(email, str) else None,
     )
     if authctl.is_long_lived_token(account.config_dir):
+        from . import config as config_module
+        from . import quota_probe
+
+        cfg = config_module.load_config()
+        if cfg.quota_probe(True):
+            probed = quota_probe.run_probe(
+                account.name,
+                account.config_dir,
+                cfg.quota_probe_model(quota_probe.DEFAULT_MODEL),
+                now,
+                tier=tier if isinstance(tier, str) else None,
+                email=email if isinstance(email, str) else None,
+            )
+            if probed.source == "probe":
+                return statusline.merge(probed, recorded)
+            if recorded is None:
+                return probed
         if recorded is not None:
             return recorded
         return AccountLimits(
@@ -324,7 +341,11 @@ def build_snapshot(
         if account.provider == "codex":
             states.extend(codex_session_states(account, now))
             continue
+        from .quota_probe import probe_dir
+
         for session in read_registry(account.config_dir):
+            if session.cwd == str(probe_dir()):
+                continue
             states.append(_state_for_session(session, account, now))
 
     if not include_dead:

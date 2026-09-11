@@ -64,6 +64,15 @@ cctop is read-only except for explicit actions you invoke:
    the status bar and never a credential. `cctop statusline uninstall`
    restores the previous setting.
 
+5. **Quota probe** (long-lived `setup-token` logins only, `quota_probe = true`
+   by default): runs `claude -p quota --max-turns 1 --tools "" --system-prompt
+   ... --no-session-persistence` under the account's config dir every
+   `quota_probe_seconds` and reads the `rate_limit_event` from its output. The
+   Claude Code binary makes the request as itself; cctop never reads or sends
+   the token. This is the one thing cctop does that spends message quota: a
+   few hundred tokens per probe, only for logins the usage endpoint refuses.
+   Disable with `quota_probe = false` (the statusline hook then stands alone).
+
 There is deliberately **no** delete, logout, or credential-writing path in
 cctop's own code.
 

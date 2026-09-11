@@ -164,11 +164,24 @@ endpoint is the only source of model-scoped weekly windows (`week (Fable)`).
 So for a normal login cctop keeps polling the endpoint and overlays the
 statusline's fresher 5h/7d numbers on top ("5h/week via statusline · 12s
 ago"); if the endpoint fails, the last statusline reading is shown instead.
-For a login made with a long-lived `claude setup-token` token the statusline
-is the **only** source: the usage endpoint refuses those tokens with a 429
-(an hour-long retry-after from the token's first use), so cctop never polls
-it for them, and the model-scoped window is unavailable — as it is in Claude
-Code's own `/usage` for such a login.
+For a login made with a long-lived `claude setup-token` token the usage
+endpoint refuses the token (a 429 with an hour-long retry-after from its
+first use), so cctop never polls it for them. Instead cctop runs a **one-turn
+quota probe through the Claude Code binary** every 5 minutes: `claude -p quota`
+under that config dir with a replaced system prompt, no tools, one turn, and
+no session persistence. Claude Code reports every window from that response
+as a `rate_limit_event`, including the model-scoped weekly one, and the gauges
+show `via claude probe`. This is the same delegation cctop uses for token
+refresh: the binary authenticates as itself and cctop never touches the token.
+A probe costs a few hundred tokens on that account (Claude Code's own quota
+check works the same way). Tune or disable it:
+
+```toml
+[settings]
+quota_probe = true                       # false: statusline only (no model-scoped window)
+quota_probe_seconds = 300
+quota_probe_model = "claude-fable-5-1"   # the model whose weekly window to read
+```
 
 ### Accounts
 

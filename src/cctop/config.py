@@ -60,6 +60,18 @@ class Config:
         value = self.settings.get("auto_refresh_tokens")
         return value if isinstance(value, bool) else default
 
+    def quota_probe(self, default: bool = True) -> bool:
+        value = self.settings.get("quota_probe")
+        return value if isinstance(value, bool) else default
+
+    def quota_probe_seconds(self, default: float = 300.0) -> float:
+        value = self.settings.get("quota_probe_seconds")
+        return float(value) if isinstance(value, (int, float)) and value >= 60 else default
+
+    def quota_probe_model(self, default: str) -> str:
+        value = self.settings.get("quota_probe_model")
+        return value if isinstance(value, str) and value else default
+
 
 def load_config(path: Path | None = None) -> Config:
     """Load the config file, or an empty Config when it is absent/unparseable."""

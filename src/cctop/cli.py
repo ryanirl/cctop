@@ -145,14 +145,16 @@ def _render_limits(limits: list[AccountLimits], now: datetime, console: Console)
         if tier:
             header += f" [grey50]({tier})[/grey50]"
 
-        if account.source not in ("api", "statusline"):
+        if account.source not in ("api", "statusline", "probe"):
             console.print(f"{header}   [grey50]{account.error or 'no limit data'}[/grey50]")
             continue
 
         gauges = "   ".join(_render_gauge(w, now) for w in account.windows)
         age = _format_age(account.fetched_at, now)
         via = ""
-        if account.source == "statusline":
+        if account.source == "probe":
+            via = " via claude probe"
+        elif account.source == "statusline":
             via = " via statusline"
         elif account.statusline_at is not None:
             via = f", 5h/week via statusline {_format_age(account.statusline_at, now)} ago"
@@ -756,6 +758,9 @@ def _config_template() -> str:
         "",
         "[settings]",
         "# limits_refresh_seconds = 180   # how often to refetch usage limits",
+        "# quota_probe = true             # long-lived logins: one-turn claude probe (all windows)",
+        "# quota_probe_seconds = 300      # how often it runs (a few hundred tokens each)",
+        '# quota_probe_model = "claude-fable-5-1"  # model whose weekly window to read',
         "",
         "# Accounts cctop auto-detected. Rename via `name`, hide with `hidden = true`,",
         "# reorder by moving blocks, or add your own block pointing at any config dir.",
@@ -1059,6 +1064,9 @@ def main() -> None:
             limits_interval=cfg.limits_refresh_seconds(180.0),
             heatmap_weeks=cfg.heatmap_weeks(26),
             auto_refresh_tokens=cfg.auto_refresh_tokens(True),
+            quota_probe=cfg.quota_probe(True),
+            quota_probe_seconds=cfg.quota_probe_seconds(300.0),
+            quota_probe_model=cfg.quota_probe_model("claude-fable-5-1"),
         ).run()
         return
 

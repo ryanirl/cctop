@@ -168,7 +168,8 @@ def _monitor(monkeypatch, responses: list[AccountLimits], long_lived: bool = Fal
     monkeypatch.setattr(monitor_mod.authctl, "is_long_lived_token", lambda d: long_lived)
     monkeypatch.setattr(monitor_mod.authctl, "ensure_fresh", lambda *a, **k: None)
     monkeypatch.setattr("cctop.usage.oauth_account", lambda d: {"emailAddress": "me@x"})
-    return FleetMonitor([Account("cc-0", Path("/x"), "claude")]), calls
+    # the statusline tests cover the endpoint/statusline policy; the probe has its own suite
+    return FleetMonitor([Account("cc-0", Path("/x"), "claude")], quota_probe=False), calls
 
 
 def _api_full(pct: float) -> AccountLimits:

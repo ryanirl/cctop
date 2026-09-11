@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from . import authctl, statusline
+from . import authctl, quota_probe, statusline
 from .authctl import RefreshResult
 from .collect import Account, _effective_status, account_limits, codex_session_states
 from .models import AccountLimits, FleetSnapshot, SessionState, UsageTotals
@@ -43,6 +43,11 @@ _PROACTIVE_NOOP_RETRY = timedelta(minutes=5)
 _EMPTY_TOTALS = UsageTotals(0, 0, 0, 0, 0.0)
 
 
+def _is_probe_session(cwd: str) -> bool:
+    """cctop's own quota-probe turns must not show up as sessions."""
+    return cwd == str(quota_probe.probe_dir())
+
+
 class FleetMonitor:
     """Holds per-session tailers and cached limits between polls."""
 
@@ -51,10 +56,19 @@ class FleetMonitor:
         accounts: list[Account],
         limits_interval: timedelta = DEFAULT_LIMITS_INTERVAL,
         auto_refresh_tokens: bool = True,
+        quota_probe: bool = True,
+        probe_interval: timedelta = quota_probe.DEFAULT_INTERVAL,
+        probe_model: str = quota_probe.DEFAULT_MODEL,
     ) -> None:
         self.accounts = accounts
         self.limits_interval = limits_interval
         self.auto_refresh_tokens = auto_refresh_tokens
+        # Long-lived logins: whether to run the one-turn claude probe, how often,
+        # and with which model (the model-scoped window follows the model).
+        self.quota_probe = quota_probe
+        self.probe_interval = probe_interval
+        self.probe_model = probe_model
+        self._probed_at: dict[str, datetime] = {}
 
         self._tailers: dict[str, TranscriptTailer] = {}
         self.limits: list[AccountLimits] = []
@@ -104,7 +118,7 @@ class FleetMonitor:
                 states.extend(self._codex_cache.get(account.name, []))
                 continue
             for session in read_registry(account.config_dir):
-                if not process_alive(session.pid):
+                if not process_alive(session.pid) or _is_probe_session(session.cwd):
                     continue
                 seen.add(session.session_id)
                 status = _effective_status(session, True, now)
@@ -242,19 +256,7 @@ class FleetMonitor:
         recorded = self._statusline_limits(account, now)
 
         if account.provider == "claude" and authctl.is_long_lived_token(account.config_dir):
-            # The usage endpoint refuses setup-token logins outright (a 429 with
-            # an hour-long retry-after from first use), so fetching is pointless:
-            # show the last statusline reading, or say what would fix it.
-            if recorded is not None:
-                return recorded
-            return AccountLimits(
-                name,
-                None,
-                [],
-                "none",
-                None,
-                error="long-lived token: run `cctop statusline install`",
-            )
+            return self._long_lived_limits(account, recorded, now)
 
         cooldown = self._cooldown_until.get(name)
         good = self._good_limits.get(name)
@@ -308,21 +310,69 @@ class FleetMonitor:
             result = replace(result, error=f"needs /login - open {name} and run /login")
         return result
 
-    def _statusline_limits(self, account: Account, now: datetime) -> AccountLimits | None:
-        """The account's last statusline-reported windows, with its identity."""
-        if account.provider != "claude":
-            return None
+    def _long_lived_limits(
+        self, account: Account, recorded: AccountLimits | None, now: datetime
+    ) -> AccountLimits:
+        """Limits for a setup-token login, which the usage endpoint refuses.
+
+        The one-turn claude probe is the only source of every window (it is
+        what Claude Code's own /usage reads for such a login); it runs on its
+        own slower cadence with the usual backoff on failure. Between probes a
+        newer statusline report refreshes the 5h/7d numbers; without a probe
+        the statusline reading stands alone.
+        """
+        name = account.name
+        good = self._good_limits.get(name)
+        if self.quota_probe:
+            cooldown = self._cooldown_until.get(name)
+            probed = self._probed_at.get(name)
+            due = probed is None or now - probed >= self.probe_interval
+            if due and (cooldown is None or now >= cooldown):
+                identity = self._identity(account)
+                result = quota_probe.run_probe(
+                    name, account.config_dir, self.probe_model, now, **identity
+                )
+                self._probed_at[name] = now
+                if result.source == "probe":
+                    self._backoff.pop(name, None)
+                    self._cooldown_until.pop(name, None)
+                    good = result
+                    self._good_limits[name] = good
+                else:
+                    previous = self._backoff.get(name)
+                    delay = _BACKOFF_BASE if previous is None else min(previous * 2, _BACKOFF_CAP)
+                    self._backoff[name] = delay
+                    self._cooldown_until[name] = now + delay
+                    if good is None and recorded is None:
+                        return result
+            if good is not None:
+                return statusline.merge(good, recorded)
+        if recorded is not None:
+            return recorded
+        hint = (
+            "run `cctop statusline install`"
+            if not self.quota_probe
+            else "waiting for the first probe"
+        )
+        return AccountLimits(name, None, [], "none", None, error=f"long-lived token: {hint}")
+
+    def _identity(self, account: Account) -> dict:
         from .usage import oauth_account
 
         identity = oauth_account(account.config_dir)
         email = identity.get("emailAddress")
         tier = identity.get("organizationRateLimitTier")
+        return {
+            "tier": tier if isinstance(tier, str) else None,
+            "email": email if isinstance(email, str) else None,
+        }
+
+    def _statusline_limits(self, account: Account, now: datetime) -> AccountLimits | None:
+        """The account's last statusline-reported windows, with its identity."""
+        if account.provider != "claude":
+            return None
         return statusline.limits_from_record(
-            account.name,
-            account.config_dir,
-            now,
-            tier=tier if isinstance(tier, str) else None,
-            email=email if isinstance(email, str) else None,
+            account.name, account.config_dir, now, **self._identity(account)
         )
 
     def poll_limits(

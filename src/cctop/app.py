@@ -18,7 +18,7 @@ now. Both polls run in thread workers so neither blocks the UI.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from rich.console import Group
 from rich.table import Table as RichTable
@@ -118,11 +118,17 @@ def _account_block(
         # just behaving alike. Truncated to the gauge width so it never wraps.
         line_width = label_width + 1 + bar_width + 12
         lines.append(Text(_fit(account.email, line_width).rstrip(), style=MUTED))
-    if account.source not in ("api", "statusline"):
+    if account.source not in ("api", "statusline", "probe"):
         lines.append(Text(account.error or "no limit data", style=MUTED))
     else:
         lines.extend(_gauge_line(window, now, bar_width, label_width) for window in account.windows)
-        if account.source == "statusline":
+        if account.source == "probe":
+            age = _format_age(account.fetched_at, now)
+            note = f"via claude probe · {age} ago"
+            if account.statusline_at is not None:
+                note += f" · 5h/week via statusline {_format_age(account.statusline_at, now)} ago"
+            lines.append(Text(note, style=MUTED))
+        elif account.source == "statusline":
             # Numbers a session on this account just reported, not a fetch: say
             # so, with their age, since they only move while a session is active.
             age = _format_age(account.fetched_at, now)
@@ -245,9 +251,18 @@ class CctopApp(App):
         limits_interval: float = 180.0,
         heatmap_weeks: int = 26,
         auto_refresh_tokens: bool = True,
+        quota_probe: bool = True,
+        quota_probe_seconds: float = 300.0,
+        quota_probe_model: str = "claude-fable-5-1",
     ) -> None:
         super().__init__()
-        self.monitor = FleetMonitor(accounts, auto_refresh_tokens=auto_refresh_tokens)
+        self.monitor = FleetMonitor(
+            accounts,
+            auto_refresh_tokens=auto_refresh_tokens,
+            quota_probe=quota_probe,
+            probe_interval=timedelta(seconds=quota_probe_seconds),
+            probe_model=quota_probe_model,
+        )
         self._limits_interval = limits_interval
         self._heatmap_weeks = heatmap_weeks
         self._auto_refresh_tokens = auto_refresh_tokens
@@ -461,6 +476,7 @@ class CctopApp(App):
                 self._heatmap_weeks,
                 rows,
                 auto_refresh_tokens=self._auto_refresh_tokens,
+                quota_probe=self.monitor.quota_probe,
             )
         )
 
@@ -479,6 +495,9 @@ class CctopApp(App):
         self._limits_interval = config.limits_refresh_seconds(180.0)
         self._heatmap_weeks = config.heatmap_weeks(26)
         self._auto_refresh_tokens = config.auto_refresh_tokens(True)
+        self.monitor.quota_probe = config.quota_probe(True)
+        self.monitor.probe_interval = timedelta(seconds=config.quota_probe_seconds(300.0))
+        self.monitor.probe_model = config.quota_probe_model("claude-fable-5-1")
         self.monitor.limits_interval = timedelta(seconds=self._limits_interval)
         self.monitor.auto_refresh_tokens = self._auto_refresh_tokens
         self.monitor.accounts = resolve_accounts(config)

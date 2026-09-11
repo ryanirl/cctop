@@ -103,12 +103,14 @@ class SettingsScreen(ModalScreen):
         weeks: int,
         rows: list[AccountRow],
         auto_refresh_tokens: bool = True,
+        quota_probe: bool = True,
     ) -> None:
         super().__init__()
         self._interval = interval
         self._weeks = weeks
         self._rows = rows
         self._auto_refresh_tokens = auto_refresh_tokens
+        self._quota_probe = quota_probe
 
     def compose(self) -> ComposeResult:
         with Container(id="settings-box") as box:
@@ -120,6 +122,8 @@ class SettingsScreen(ModalScreen):
                 yield Input(value=str(self._weeks), id="weeks", type="integer")
                 yield Label("Auto-refresh expiring tokens (via the claude binary)")
                 yield Switch(value=self._auto_refresh_tokens, id="auto-refresh")
+                yield Label("Long-lived logins: one-turn claude probe for every limit window")
+                yield Switch(value=self._quota_probe, id="quota-probe")
                 yield Label("Accounts  (toggle to show, edit the name)")
                 for index, row in enumerate(self._rows):
                     with Horizontal(classes="acct-row"):
@@ -154,6 +158,7 @@ class SettingsScreen(ModalScreen):
             "limits_refresh_seconds": self._int("interval", 180, 10),
             "heatmap_weeks": self._int("weeks", 26, 1),
             "auto_refresh_tokens": self.query_one("#auto-refresh", Switch).value,
+            "quota_probe": self.query_one("#quota-probe", Switch).value,
         }
         accounts = []
         for index, row in enumerate(self._rows):
