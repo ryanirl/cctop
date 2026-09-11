@@ -29,6 +29,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -193,6 +194,46 @@ def limits_from_record(
         fetched_at=recorded,
         email=email,
     )
+
+
+_MERGE_KINDS = {"session", "weekly_all"}
+
+
+def merge(api: AccountLimits, recorded: AccountLimits | None) -> AccountLimits:
+    """Overlay a newer statusline reading onto an endpoint result.
+
+    The endpoint is the only source of model-scoped windows (week (Fable)),
+    so its result stays the base; the 5h and weekly-all windows take the
+    statusline's fresher percentages and reset times when it is newer.
+    """
+    if (
+        recorded is None
+        or api.source != "api"
+        or recorded.fetched_at is None
+        or (api.fetched_at is not None and recorded.fetched_at <= api.fetched_at)
+    ):
+        return api
+    newer = {w.kind: w for w in recorded.windows if w.kind in _MERGE_KINDS}
+    if not newer:
+        return api
+    windows = []
+    for window in api.windows:
+        fresh = newer.get(window.kind)
+        if fresh is None:
+            windows.append(window)
+            continue
+        windows.append(
+            LimitWindow(
+                window.kind,
+                window.label,
+                fresh.percent,
+                fresh.resets_at or window.resets_at,
+                window.severity,
+                window.is_active,
+                True,
+            )
+        )
+    return replace(api, windows=windows, statusline_at=recorded.fetched_at)
 
 
 def is_fresh(limits: AccountLimits | None, now: datetime) -> bool:

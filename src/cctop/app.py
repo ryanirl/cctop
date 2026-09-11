@@ -127,6 +127,9 @@ def _account_block(
             # so, with their age, since they only move while a session is active.
             age = _format_age(account.fetched_at, now)
             lines.append(Text(f"via statusline · {age} ago", style=MUTED))
+        elif account.statusline_at is not None:
+            age = _format_age(account.statusline_at, now)
+            lines.append(Text(f"5h/week via statusline · {age} ago", style=MUTED))
     return Group(*lines)
 
 

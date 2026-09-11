@@ -151,7 +151,11 @@ def _render_limits(limits: list[AccountLimits], now: datetime, console: Console)
 
         gauges = "   ".join(_render_gauge(w, now) for w in account.windows)
         age = _format_age(account.fetched_at, now)
-        via = " via statusline" if account.source == "statusline" else ""
+        via = ""
+        if account.source == "statusline":
+            via = " via statusline"
+        elif account.statusline_at is not None:
+            via = f", 5h/week via statusline {_format_age(account.statusline_at, now)} ago"
         console.print(f"{header}   {gauges}   [grey50]{age} ago{via}[/grey50]")
 
 

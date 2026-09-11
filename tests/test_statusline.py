@@ -171,22 +171,46 @@ def _monitor(monkeypatch, responses: list[AccountLimits], long_lived: bool = Fal
     return FleetMonitor([Account("cc-0", Path("/x"), "claude")]), calls
 
 
-def test_fresh_record_skips_the_network(monkeypatch, tmp_path: Path) -> None:
+def _api_full(pct: float) -> AccountLimits:
+    from cctop.models import LimitWindow
+
+    windows = [
+        LimitWindow("session", "5h", pct, None, "normal", False),
+        LimitWindow("weekly_all", "week (all)", pct, None, "normal", False),
+        LimitWindow("weekly_scoped", "week (Fable)", 71.0, None, "normal", True),
+    ]
+    return AccountLimits("cc-0", "max", windows, "api", T0)
+
+
+def test_normal_login_keeps_endpoint_and_takes_fresher_numbers(monkeypatch, tmp_path: Path) -> None:
     _state(monkeypatch, tmp_path)
-    statusline.record(PAYLOAD, Path("/x"), T0)
-    monitor, calls = _monitor(monkeypatch, [_api(99.0)])
-    result = monitor.poll_limits(T0 + timedelta(minutes=1), force=True)
-    assert result[0].source == "statusline" and result[0].windows[0].percent == 37.0
-    assert result[0].email == "me@x"
-    assert calls[0] == 0
+    statusline.record(PAYLOAD, Path("/x"), T0 + timedelta(minutes=1))  # newer than the fetch
+    monitor, calls = _monitor(monkeypatch, [_api_full(50.0)])
+    result = monitor.poll_limits(T0 + timedelta(minutes=2), force=True)[0]
+    assert calls[0] == 1 and result.source == "api"
+    by_kind = {w.kind: w for w in result.windows}
+    assert by_kind["session"].percent == 37.0  # refreshed from the statusline
+    assert by_kind["weekly_all"].percent == 14.4
+    assert by_kind["weekly_scoped"].percent == 71.0  # only the endpoint has this
+    assert result.statusline_at == T0 + timedelta(minutes=1)
+
+
+def test_older_record_does_not_override_endpoint(monkeypatch, tmp_path: Path) -> None:
+    _state(monkeypatch, tmp_path)
+    statusline.record(PAYLOAD, Path("/x"), T0 - timedelta(minutes=5))
+    monitor, _ = _monitor(monkeypatch, [_api_full(50.0)])
+    result = monitor.poll_limits(T0, force=True)[0]
+    assert {w.kind: w.percent for w in result.windows}["session"] == 50.0
+    assert result.statusline_at is None
 
 
 def test_stale_record_yields_to_api(monkeypatch, tmp_path: Path) -> None:
     _state(monkeypatch, tmp_path)
-    statusline.record(PAYLOAD, Path("/x"), T0)
+    statusline.record(PAYLOAD, Path("/x"), T0 - timedelta(hours=1))
     monitor, calls = _monitor(monkeypatch, [_api(50.0)])
-    result = monitor.poll_limits(T0 + timedelta(hours=1), force=True)
+    result = monitor.poll_limits(T0, force=True)
     assert result[0].source == "api" and result[0].windows[0].percent == 50.0
+    assert result[0].statusline_at is None
     assert calls[0] == 1
 
 
@@ -217,8 +241,14 @@ def test_snapshot_uses_record(monkeypatch, tmp_path: Path) -> None:
     _state(monkeypatch, tmp_path)
     cfg = tmp_path / ".claude"
     cfg.mkdir()
-    statusline.record(PAYLOAD, cfg, T0)
-    monkeypatch.setattr(collect, "account_limits", lambda a: _api(1.0))
+    statusline.record(PAYLOAD, cfg, T0 + timedelta(minutes=1))  # newer than the fetch at T0
+    monkeypatch.setattr(collect, "account_limits", lambda a: _api_full(1.0))
     monkeypatch.setattr("cctop.authctl.is_long_lived_token", lambda d: False)
     result = collect.resolve_limits(Account("cc-0", cfg, "claude"), T0 + timedelta(minutes=2))
-    assert result.source == "statusline"
+    assert result.source == "api"
+    assert {w.kind: w.percent for w in result.windows} == {
+        "session": 37.0,
+        "weekly_all": 14.4,
+        "weekly_scoped": 71.0,
+    }
+    assert result.statusline_at == T0 + timedelta(minutes=1)

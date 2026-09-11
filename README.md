@@ -159,12 +159,16 @@ and prints a compact status line (model · dir · 5h % · wk %). If you already
 have a statusline, it is wrapped and keeps rendering exactly as before. The
 settings file is backed up once, and `uninstall` puts it back.
 
-With the hook in place cctop prefers a reading less than 15 minutes old over
-the endpoint, keeps the last reading when the endpoint fails, and shows
-`via statusline` under the gauges. This is also the **only** way to get
-numbers for a login made with a long-lived `claude setup-token` token: the
-usage endpoint refuses those with a 429 (an hour-long retry-after from the
-token's first use), so cctop never polls it for them.
+The statusline only carries the 5-hour and 7-day windows, while the usage
+endpoint is the only source of model-scoped weekly windows (`week (Fable)`).
+So for a normal login cctop keeps polling the endpoint and overlays the
+statusline's fresher 5h/7d numbers on top ("5h/week via statusline · 12s
+ago"); if the endpoint fails, the last statusline reading is shown instead.
+For a login made with a long-lived `claude setup-token` token the statusline
+is the **only** source: the usage endpoint refuses those tokens with a 429
+(an hour-long retry-after from the token's first use), so cctop never polls
+it for them, and the model-scoped window is unavailable — as it is in Claude
+Code's own `/usage` for such a login.
 
 ### Accounts
 

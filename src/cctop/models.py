@@ -135,6 +135,9 @@ class AccountLimits:
     # shown next to the account name so two accounts that silently share one
     # login are visibly the same instead of merely behaving the same.
     email: str | None = None
+    # When the 5h/7d windows were last refreshed from a session's statusline
+    # report (newer than the endpoint fetch), or None when they were not.
+    statusline_at: datetime | None = None
 
 
 @dataclass(frozen=True)

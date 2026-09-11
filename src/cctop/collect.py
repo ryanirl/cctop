@@ -282,8 +282,6 @@ def resolve_limits(account: Account, now: datetime | None = None) -> AccountLimi
         tier=tier if isinstance(tier, str) else None,
         email=email if isinstance(email, str) else None,
     )
-    if statusline.is_fresh(recorded, now):
-        return recorded  # type: ignore[return-value]
     if authctl.is_long_lived_token(account.config_dir):
         if recorded is not None:
             return recorded
@@ -299,7 +297,7 @@ def resolve_limits(account: Account, now: datetime | None = None) -> AccountLimi
     result = account_limits(account)
     if result.source != "api" and recorded is not None:
         return recorded
-    return result
+    return statusline.merge(result, recorded)
 
 
 def build_snapshot(

@@ -240,13 +240,6 @@ class FleetMonitor:
         """
         name = account.name
         recorded = self._statusline_limits(account, now)
-        if statusline.is_fresh(recorded, now):
-            # A session on this account reported its windows moments ago: that
-            # is the freshest possible reading, and it cost no request.
-            self._good_limits[name] = recorded  # type: ignore[assignment]
-            self._backoff.pop(name, None)
-            self._cooldown_until.pop(name, None)
-            return recorded  # type: ignore[return-value]
 
         if account.provider == "claude" and authctl.is_long_lived_token(account.config_dir):
             # The usage endpoint refuses setup-token logins outright (a 429 with
@@ -284,6 +277,9 @@ class FleetMonitor:
                 result = account_limits(account)
 
         if result.source == "api":
+            # The endpoint is the only source of model-scoped windows; a newer
+            # statusline report just refreshes the 5h/7d numbers on top of it.
+            result = statusline.merge(result, recorded)
             self._good_limits[name] = result
             self._backoff.pop(name, None)
             self._cooldown_until.pop(name, None)
