@@ -48,6 +48,7 @@ DIM = "grey37"
 MUTED = "grey50"
 BAR_WIDTH = 22
 
+
 def _row_key(state: SessionState) -> str:
     """Unique table key per live process. Session ids repeat across pids when a
     still-running session is resumed or forked, so key by account and pid."""
@@ -117,10 +118,15 @@ def _account_block(
         # just behaving alike. Truncated to the gauge width so it never wraps.
         line_width = label_width + 1 + bar_width + 12
         lines.append(Text(_fit(account.email, line_width).rstrip(), style=MUTED))
-    if account.source != "api":
+    if account.source not in ("api", "statusline"):
         lines.append(Text(account.error or "no limit data", style=MUTED))
     else:
         lines.extend(_gauge_line(window, now, bar_width, label_width) for window in account.windows)
+        if account.source == "statusline":
+            # Numbers a session on this account just reported, not a fetch: say
+            # so, with their age, since they only move while a session is active.
+            age = _format_age(account.fetched_at, now)
+            lines.append(Text(f"via statusline · {age} ago", style=MUTED))
     return Group(*lines)
 
 

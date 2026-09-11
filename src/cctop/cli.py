@@ -145,13 +145,14 @@ def _render_limits(limits: list[AccountLimits], now: datetime, console: Console)
         if tier:
             header += f" [grey50]({tier})[/grey50]"
 
-        if account.source != "api":
+        if account.source not in ("api", "statusline"):
             console.print(f"{header}   [grey50]{account.error or 'no limit data'}[/grey50]")
             continue
 
         gauges = "   ".join(_render_gauge(w, now) for w in account.windows)
         age = _format_age(account.fetched_at, now)
-        console.print(f"{header}   {gauges}   [grey50]{age} ago[/grey50]")
+        via = " via statusline" if account.source == "statusline" else ""
+        console.print(f"{header}   {gauges}   [grey50]{age} ago{via}[/grey50]")
 
 
 def _render_table(snapshot: FleetSnapshot, multi_account: bool) -> Table:
@@ -924,6 +925,46 @@ def _cmd_setup() -> None:
     _setup_provider(app.selected, console)
 
 
+def _cmd_statusline(argv: list[str]) -> None:
+    """Wire Claude Code's statusline into cctop's limits feed (explicit, reversible)."""
+    from . import statusline
+
+    parser = argparse.ArgumentParser(
+        prog="cctop statusline",
+        description=(
+            "Record usage limits from Claude Code's statusline, so cctop shows "
+            "real numbers with no network, and for long-lived tokens at all."
+        ),
+    )
+    parser.add_argument("action", choices=["install", "uninstall", "status"])
+    parser.add_argument(
+        "--dir",
+        type=Path,
+        action="append",
+        metavar="CONFIG_DIR",
+        help="Only this Claude config dir (repeatable). Default: every detected Claude account.",
+    )
+    args = parser.parse_args(argv)
+    dirs = (
+        [d.expanduser() for d in args.dir]
+        if args.dir
+        else [a.config_dir for a in default_accounts() if a.provider == "claude"]
+    )
+    console = Console()
+    for config_dir in dirs:
+        if args.action == "install":
+            console.print(statusline.install(config_dir))
+        elif args.action == "uninstall":
+            console.print(statusline.uninstall(config_dir))
+        else:
+            console.print(statusline.status(config_dir))
+    if args.action == "install":
+        console.print(
+            "[grey50]Claude Code picks the statusline up on its next session start; "
+            "cctop shows 'via statusline' once a session has made a request.[/grey50]"
+        )
+
+
 def _resolve_accounts(args: argparse.Namespace) -> list[Account]:
     if args.account:
         accounts = []
@@ -957,6 +998,9 @@ def main() -> None:
         return
     if argv[:1] == ["search"]:
         _cmd_search(argv[1:])
+        return
+    if argv[:1] == ["statusline"]:
+        _cmd_statusline(argv[1:])
         return
 
     parser = argparse.ArgumentParser(

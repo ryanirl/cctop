@@ -49,6 +49,7 @@ Issues = "https://github.com/ryanirl/cctop/issues"
 
 [project.scripts]
 cctop = "cctop.cli:main"
+cctop-statusline = "cctop.statusline:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

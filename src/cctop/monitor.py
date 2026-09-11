@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from . import authctl
+from . import authctl, statusline
 from .authctl import RefreshResult
 from .collect import Account, _effective_status, account_limits, codex_session_states
 from .models import AccountLimits, FleetSnapshot, SessionState, UsageTotals
@@ -239,11 +239,37 @@ class FleetMonitor:
         a real error (token expired) is surfaced as-is.
         """
         name = account.name
+        recorded = self._statusline_limits(account, now)
+        if statusline.is_fresh(recorded, now):
+            # A session on this account reported its windows moments ago: that
+            # is the freshest possible reading, and it cost no request.
+            self._good_limits[name] = recorded  # type: ignore[assignment]
+            self._backoff.pop(name, None)
+            self._cooldown_until.pop(name, None)
+            return recorded  # type: ignore[return-value]
+
+        if account.provider == "claude" and authctl.is_long_lived_token(account.config_dir):
+            # The usage endpoint refuses setup-token logins outright (a 429 with
+            # an hour-long retry-after from first use), so fetching is pointless:
+            # show the last statusline reading, or say what would fix it.
+            if recorded is not None:
+                return recorded
+            return AccountLimits(
+                name,
+                None,
+                [],
+                "none",
+                None,
+                error="long-lived token: run `cctop statusline install`",
+            )
+
         cooldown = self._cooldown_until.get(name)
         good = self._good_limits.get(name)
         if cooldown is not None and now < cooldown:
             if good is not None:
                 return good
+            if recorded is not None:
+                return recorded
             return AccountLimits(
                 name, None, [], "none", None, error="rate limited, retrying", retriable=True
             )
@@ -271,16 +297,37 @@ class FleetMonitor:
                 delay = _BACKOFF_BASE if previous is None else min(previous * 2, _BACKOFF_CAP)
             self._backoff[name] = delay
             self._cooldown_until[name] = now + delay
-            return good if good is not None else result
+            if good is not None:
+                return good
+            return recorded if recorded is not None else result
 
         # Non-retriable (token expired, wrong credential): a real, actionable
         # state. Drop any stale-good so the UI shows what the user must fix.
         self._good_limits.pop(name, None)
+        if recorded is not None and not result.auth_expired:
+            return recorded
         if result.auth_expired and name in self._auth_failed_expiry:
             # Auto-refresh already tried and failed: the refresh token itself
             # is dead, so say the one thing that actually fixes it.
             result = replace(result, error=f"needs /login - open {name} and run /login")
         return result
+
+    def _statusline_limits(self, account: Account, now: datetime) -> AccountLimits | None:
+        """The account's last statusline-reported windows, with its identity."""
+        if account.provider != "claude":
+            return None
+        from .usage import oauth_account
+
+        identity = oauth_account(account.config_dir)
+        email = identity.get("emailAddress")
+        tier = identity.get("organizationRateLimitTier")
+        return statusline.limits_from_record(
+            account.name,
+            account.config_dir,
+            now,
+            tier=tier if isinstance(tier, str) else None,
+            email=email if isinstance(email, str) else None,
+        )
 
     def poll_limits(
         self,

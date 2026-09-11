@@ -121,6 +121,41 @@ def _keychain_read(service: str) -> str | None:
     return result.stdout.strip() or None
 
 
+def _oauth_record(config_dir: Path) -> dict | None:
+    """The account's claudeAiOauth record from its own store, or None."""
+    try:
+        record = json.loads((config_dir / ".credentials.json").read_text())
+        oauth = record.get("claudeAiOauth")
+        if isinstance(oauth, dict):
+            return oauth
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    for service in keychain_services(config_dir):
+        raw = _keychain_read(service)
+        if raw is None:
+            continue
+        try:
+            oauth = json.loads(raw).get("claudeAiOauth")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(oauth, dict):
+            return oauth
+    return None
+
+
+def is_long_lived_token(config_dir: Path) -> bool:
+    """Whether the stored login is a long-lived `claude setup-token` token.
+
+    Such tokens carry no refresh token. The usage endpoint refuses them (a 429
+    with an hour-long retry-after from first use), so callers skip the fetch
+    and rely on the statusline feed instead.
+    """
+    oauth = _oauth_record(config_dir)
+    if not oauth or not isinstance(oauth.get("accessToken"), str):
+        return False
+    return not oauth.get("refreshToken")
+
+
 def read_expiry(config_dir: Path) -> datetime | None:
     """The access token's expiry from the account's own store (read-only).
 

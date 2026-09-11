@@ -260,6 +260,48 @@ def account_limits(account: Account) -> AccountLimits:
     return usage.fetch_account_limits(account.name, account.config_dir)
 
 
+def resolve_limits(account: Account, now: datetime | None = None) -> AccountLimits:
+    """An account's limits: the statusline record when fresh, else the API.
+
+    Long-lived (setup-token) logins never hit the API, which refuses them; a
+    stale statusline record beats an error for any account whose fetch failed.
+    """
+    now = now or datetime.now(timezone.utc)
+    if account.provider != "claude":
+        return account_limits(account)
+
+    from . import authctl, statusline, usage
+
+    identity = usage.oauth_account(account.config_dir)
+    email = identity.get("emailAddress")
+    tier = identity.get("organizationRateLimitTier")
+    recorded = statusline.limits_from_record(
+        account.name,
+        account.config_dir,
+        now,
+        tier=tier if isinstance(tier, str) else None,
+        email=email if isinstance(email, str) else None,
+    )
+    if statusline.is_fresh(recorded, now):
+        return recorded  # type: ignore[return-value]
+    if authctl.is_long_lived_token(account.config_dir):
+        if recorded is not None:
+            return recorded
+        return AccountLimits(
+            account.name,
+            None,
+            [],
+            "none",
+            None,
+            error="long-lived token: usage API refuses it; run `cctop statusline install`",
+            email=email if isinstance(email, str) else None,
+        )
+    result = account_limits(account)
+    if result.source != "api" and recorded is not None:
+        return recorded
+    return result
+
+
 def build_snapshot(
     accounts: list[Account],
     now: datetime | None = None,
@@ -277,7 +319,7 @@ def build_snapshot(
 
     limits: list[AccountLimits] = []
     if with_limits:
-        limits = [account_limits(account) for account in accounts]
+        limits = [resolve_limits(account, now) for account in accounts]
 
     states: list[SessionState] = []
     for account in accounts:

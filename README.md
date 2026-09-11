@@ -140,6 +140,32 @@ Failed attempts back off and go quiet until you actually `/login` (a dead
 says exactly that, once). Disable with `auto_refresh_tokens = false` in the
 config or the settings screen; `R` remains the manual, force-it-now version.
 
+### Usage limits from the statusline (no network, works with long-lived tokens)
+
+Claude Code hands its statusline command a JSON document after every API
+response, and that document carries the same `rate_limits` the `/usage`
+screen shows (5-hour and 7-day windows, straight from the response headers).
+cctop can read those instead of polling the usage endpoint:
+
+```sh
+cctop statusline install      # every detected Claude account; --dir ~/.claude-2 for one
+cctop statusline status
+cctop statusline uninstall
+```
+
+`install` sets `statusLine` in each account's `settings.json` to a tiny hook
+(`cctop-statusline`) that records the numbers under `~/.local/state/cctop/`
+and prints a compact status line (model · dir · 5h % · wk %). If you already
+have a statusline, it is wrapped and keeps rendering exactly as before. The
+settings file is backed up once, and `uninstall` puts it back.
+
+With the hook in place cctop prefers a reading less than 15 minutes old over
+the endpoint, keeps the last reading when the endpoint fails, and shows
+`via statusline` under the gauges. This is also the **only** way to get
+numbers for a login made with a long-lived `claude setup-token` token: the
+usage endpoint refuses those with a 429 (an hour-long retry-after from the
+token's first use), so cctop never polls it for them.
+
 ### Accounts
 
 cctop **auto-detects your accounts** with zero setup: your Claude Code account

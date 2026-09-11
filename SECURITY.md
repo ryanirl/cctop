@@ -15,6 +15,7 @@ not do, because a tool that sits next to your credentials should be auditable.
 | `GET https://chatgpt.com/backend-api/codex/usage` | real Codex usage limits |
 | macOS Keychain item `Claude Code-credentials-<hash>`, or `~/.claude*/.credentials.json` | the OAuth token used to authenticate the two GETs above |
 | `~/.codex/auth.json` | the token used to authenticate the Codex usage GET |
+| `~/.local/state/cctop/limits/*.json` | usage windows recorded by the optional statusline hook (percentages and reset times only) |
 
 All of it is read-only. The two usage GETs are plain reads that consume no
 message quota.
@@ -54,6 +55,14 @@ cctop is read-only except for explicit actions you invoke:
    `CLAUDE_CONFIG_DIR` pinned to the session's own account. The search itself
    is a read-only ripgrep scan of the transcript files; any new conversation
    content is written by the resumed tool, never by cctop.
+
+4. **Statusline hook** (`cctop statusline install`): sets `statusLine` in an
+   account's `settings.json` to the `cctop-statusline` command (wrapping any
+   existing statusline so it keeps working), after a one-time backup of the
+   file. The hook itself only ever writes percentages and reset times under
+   `~/.local/state/cctop/`; it sees the same document Claude Code shows in
+   the status bar and never a credential. `cctop statusline uninstall`
+   restores the previous setting.
 
 There is deliberately **no** delete, logout, or credential-writing path in
 cctop's own code.
